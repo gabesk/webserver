@@ -47,7 +47,6 @@ int test;
 #define HTTP_PREFIX "http://"
 #define WEBSITE_DIR "c:\\website"
 
-
 #define ERROR_EXIT(err_msg) { \
 	perror(err_msg); \
 	exit(errno); \
@@ -346,6 +345,17 @@ int readheaders(struct context* ctxt, char*** outheaders) {
 	return 0;
 }
 
+//
+// This routine reads data from a TCP connection assume it to be HTTP headers.
+// In then unfolds them if needed, and returns the unfolded headers (which are
+// ASCII newline terminated strings) in outheaders.
+// Outheaders points to an array of strings with the final element a pointer to
+// an empty string.
+//
+// If successful, it returns 0 and the caller is responsible for freeing each
+// string of the array and then the array itself. If not, it returns a POSIX
+// error code and outheaders is not modified. 
+//
 int readandunfoldheaders(struct context* ctxt, char*** outheaders) {
 	char **headers, **curheader, *foldedheader, **prevheader = NULL, *tmp;
 	int i = 0;
@@ -403,6 +413,14 @@ int readandunfoldheaders(struct context* ctxt, char*** outheaders) {
 	return 0;
 }
 
+//
+// This routine initializes a shared ctxt data structure used by routines which
+// serve clients webpages.
+//
+// Upon success, it returns 0 and populates outctxt.
+// Upon failure, it returns a POSIX error code and does not modify outcxtx.
+// If successful, the caller is responsible for freeing outctxt.
+//
 int init_lineparser(struct context** outctxt) {
 	struct context* ctxt = malloc(sizeof(struct context)); if (!ctxt) return ENOMEM;
 	ctxt->line_buffer = malloc(MAX_BUF);
@@ -422,6 +440,17 @@ int init_lineparser(struct context** outctxt) {
 	return 0;
 }
 
+//
+// This routine accepts a string containing an HTTP request and parses the
+// request action to see if it one supported by this server.
+//
+// In particular, if it is a HTTP GET request. If it is, it parses the request
+// URI and places it in ctxt->request_uri.
+//
+// It returns 0 upon success and a POSIX error on failure.
+// If it returns success, the caller is responsible for freeing
+// ctxt->request_uril
+//
 #define VERB_GET "GET "
 int parse_get(struct context* ctxt, char* header) {
 	char* next_token = NULL;
@@ -455,6 +484,16 @@ void parseheader(char* header) {
 	// Don't care about any other header for now.
 }
 
+//
+// This routine reads data from a TCP connection and attempts to parse it as
+// HTTP request headers.
+//
+// If successful, it populates ctxt with the header information.
+//
+// It returns 0 upon success, and a POSIX error on failure.
+// If it returns success, the caller is responsible for freeing
+// ctxt->request_uri.
+//
 int parseheaders(struct context* ctxt) {
 	int parsed_first_line = 0;
 	char **curheader, **headers;
@@ -489,6 +528,12 @@ int parseheaders(struct context* ctxt) {
 	return err;
 }
 
+//
+// This routine wraps the socket send call, repeatedly calling it until the
+// entire buffer data is sent, or an error occurs.
+//
+// It returns the same error values as the underlying send() call.
+//
 int sendall(SOCKET s, char* data, size_t len) {
 	int err;
 	int ret_send;
@@ -513,6 +558,12 @@ int sendall(SOCKET s, char* data, size_t len) {
 	return 0;
 }
 
+//
+// This routine serves an HTTP error status code.
+//
+// It expects ctxt->client to be valid.
+//
+//
 void serveerr(struct context* ctxt, int err) {
 	char full_response[32];
 	int http_status_code;
@@ -538,6 +589,17 @@ void serveerr(struct context* ctxt, int err) {
 	printf(full_response);
 }
 
+//
+// This routine accepts a string (uri) and, if it is an HTTP URI, parses it into
+// its component pieces.
+//
+// Each of the pieces (out*) are optional and may be NULL if not needed.
+//
+// If successful, it returns 0. Otherwise, it returns a standard POSIX error.
+//
+// If successful and out* is not null, the caller is responsible for freeing the
+// value.
+//
 int format_uri(char* uri, char** outserver, int* outport, char** outpath, char** outcookedpath) {
 	char *server = NULL, *path = NULL, *cookedpath = NULL;
 	// Theoretically ports could be any length, but C isn't going to be able to
@@ -651,6 +713,19 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 	return 0;
 }
 
+//
+// This routine attempts to server a static website from disk to a network
+// client which made an HTTP 1.0 request.
+//
+// It expects ctxt to be populated by a previous call to parseheaders().
+//
+// It returns 0 on success, otherwise a standard POSIX error.
+// It also sets the attempt_to_serve_error variable depending on the nature of
+// the error.
+// If true, the socket connect is intact, and the caller may attempt to serve
+// other data (such as a 404 page). If not, it is broken and no further data
+// transfer is possible.
+//
 int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	// Things needing freeing
 	char *filename = NULL, *data = NULL;
@@ -738,7 +813,15 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	return 0;
 }
 
-void less_crappy_server() {
+//
+// This routine runs a simple webserver on localhost port 8080.
+//
+// For each connection received, it spawns a thread which runs the
+// client_thread routine.
+//
+// It never returns.
+//
+void simple_server() {
 	// Initialize Winsock.
 	WSADATA d = { 0 };
 	if (WSAStartup(MAKEWORD(2, 2), &d)) ERROR_EXIT("WSAStartup");
@@ -770,43 +853,37 @@ void less_crappy_server() {
 int main(int argc, char *argv[]) {
 	int err = 0;
 
-	if (!test) {
-		printf("Starting server in normal (non-test) mode.\n");
-		less_crappy_server();
-		return 0;
-	}
+#ifndef TESTING
 
-	// Test the server
-	
+	printf("Starting server in normal (non-test) mode.\n");
+	simple_server();
+	return 0;
+
+#else 
+
 	printf("Testing the server.\n");
 
 	printf("Testing readline() function.\n");
 	err = test_readline();
 	printf("done\n");
 
-	//int err, attempt_to_serve_error = 1;
-	//struct context* ctxt;
-
-	//crappy_server();
-	//err = init_lineparser(&ctxt);
-
-	//if (!err) {
-	//	err = parseheaders(ctxt);
-	//	if (!err) {
-	//		err = serve_document(ctxt, &attempt_to_serve_error);
-	//	}
-	//}
-
-	//if (err && attempt_to_serve_error) {
-	//	serveerr(ctxt, err);
-	//}
-
-	//printf("Done\n");
-	//closesocket(ctxt->client);
-
     return err;
+
+#endif
+
 }
 
+//
+// This routine runs from the thread spawned by simple_server in response to an
+// incoming TCP connection.
+//
+// It attemps to parse an HTTP request from a client and, if successful, return
+// a single static website.
+//
+// After doing so (successful or not), it exits and the thread terminates.
+//
+// It does not return a value.
+//
 void client_thread(void* thread_argument) {
 	SOCKET client = (SOCKET)thread_argument;
 
@@ -827,7 +904,6 @@ void client_thread(void* thread_argument) {
 		serveerr(ctxt, err);
 	}
 
-	//printf("Done\n");
 	closesocket(ctxt->client);
 	free(ctxt->line_buffer);
 	free(ctxt);
