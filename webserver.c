@@ -225,6 +225,10 @@ int readline(struct context* ctxt, char** outline) {
 	return 0;
 }
 
+//
+// This routine tests the readline routine by directing it to artificially
+// induce errors in itself.
+//
 int test_readline() {
 	char* line;
 	int i = 0;
@@ -254,6 +258,13 @@ int test_readline() {
 	return err;
 }
 
+//
+// This routine tests the line unfolding ability of the readandunfoldheaders
+// routine by artificially folding received lines at every valid opportunity.
+//
+// It acts as a filter in-between readandunfoldheaders and readline and has the
+// same function signature as readline.
+//
 int fold_line(struct context* ctxt, char** line) {
 	char* aspace;
 	char* ret;
@@ -289,6 +300,13 @@ int fold_line(struct context* ctxt, char** line) {
 	return 0;
 }
 
+//
+// This routine frees the memory allocated by readheaders. Normally this occurs
+// in parseheaders once it is done with them; however, in the case of an error,
+// readandunfoldheaders will also call this routine before returing to its
+// caller.
+// 
+//
 void freeheaders(char** headers) {
 	char **curheader = headers;
 	while (*curheader) {
@@ -298,6 +316,12 @@ void freeheaders(char** headers) {
 	free(headers);
 }
 
+//
+// This routine calls readline repeatedly assembling the results into an array
+// which it returns via outheaders. If an error is not returned, the caller is
+// responsible for freeing this array via a call to freeheaders.
+//
+//
 int readheaders(struct context* ctxt, char*** outheaders) {
 	char* header;
 	char** headers;
@@ -346,7 +370,7 @@ int readheaders(struct context* ctxt, char*** outheaders) {
 }
 
 //
-// This routine reads data from a TCP connection assume it to be HTTP headers.
+// This routine reads data from a TCP connection assuming it to be HTTP headers.
 // In then unfolds them if needed, and returns the unfolded headers (which are
 // ASCII newline terminated strings) in outheaders.
 // Outheaders points to an array of strings with the final element a pointer to
@@ -449,7 +473,7 @@ int init_lineparser(struct context** outctxt) {
 //
 // It returns 0 upon success and a POSIX error on failure.
 // If it returns success, the caller is responsible for freeing
-// ctxt->request_uril
+// ctxt->request_uri
 //
 #define VERB_GET "GET "
 int parse_get(struct context* ctxt, char* header) {
@@ -562,7 +586,6 @@ int sendall(SOCKET s, char* data, size_t len) {
 // This routine serves an HTTP error status code.
 //
 // It expects ctxt->client to be valid.
-//
 //
 void serveerr(struct context* ctxt, int err) {
 	char full_response[32];
