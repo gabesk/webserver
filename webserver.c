@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <tchar.h>
+#include <assert.h>
 #include <process.h>
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <WinSock2.h>
@@ -27,7 +28,7 @@
 int code_coverage[64];
 int simulate_error[64];
 
-#define TESTING
+// #define TESTING
 
 #ifdef TESTING
 
@@ -46,7 +47,6 @@ int test;
 #define NEWLINE "\r\n"
 #define HTTP_PREFIX "http://"
 #define WEBSITE_DIR "c:\\website"
-
 
 #define ERROR_EXIT(err_msg) { \
 	perror(err_msg); \
@@ -78,15 +78,26 @@ struct context {
 };
 
 //
-// Accepts an initialized socket and reads lines of data, stopping when a blank
-// line is received.
+// Reads a single line of data from a socket, returning the value in outline.
 //
-// Returns an array of pointers to strings, one for each line read. The array is
-// terminated by a NULL pointer.
+// Preconditions:
+//   ctxt points to a structure initialized with init_lineparser().
+//   ctxt->client is a valid socket.
+//   outline is a valid pointer which receives a pointer to a line of data.
 //
-// If the return value is non-zero, caller is responsible for freeing each
-// string, then the array of pointers to string.
+// Postconditions:
+//   0:     the call was successful and outline receives a pointer to a null
+//          terminated string which the caller frees.
+//   other: the call failed. outline was not modified.
 //
+// Remarks:
+//
+// This routine stores data read from the socket but not yet returned as a
+// complete line in a temporary buffer in ctxt.
+//
+// It is designed to use as little memory as possible, which means that once a
+// line of data is returned to the caller, it only stores whatever is leftover
+// in a small buffer with only a small amount of extra room.
 
 int readline(struct context* ctxt, char** outline) {
 	size_t amt_read, chars_cur_in_line_buf_not_inc_null_term;
@@ -97,13 +108,18 @@ int readline(struct context* ctxt, char** outline) {
 	int i = 0;
 	*outline = NULL;
 	do {
+		// Is there a complete line already in the line_buffer?
 		newline = strstr(ctxt->line_buffer, NEWLINE);
-
-		// Is there a newline?
 		if (newline) {
+			// How many characters are in the line, not including \r\n?
 			line_len = newline - ctxt->line_buffer;
-		
-			// Copy the line's data into a new buffer
+
+			//
+			// Copy the line's data into a new buffer, failing if there isn't
+			// enough memory.
+			//
+
+			// Allocate enough for the buffer, including NULL terminator.
 			line = malloc(line_len + 1);
 			if (!line || simulate_error[0]) {
 				if (simulate_error[0]) free(line);
@@ -111,20 +127,29 @@ int readline(struct context* ctxt, char** outline) {
 				return ENOMEM;
 			}
 
+			// Copy the line into the new buffer.
 			memcpy(line, ctxt->line_buffer, line_len);
 			line[line_len] = '\0';
 			leftover = newline + strlen(NEWLINE);
 
+			//
 			// If there is data for a new line, copy it into its own memory,
-			// since this line's will be freed before returning the line to the caller.
+			// since this line's will be freed before returning the line to the
+			// caller.
+			//
+
 			leftover_len = strlen(leftover);
 			if (leftover_len) {
 				code_coverage[1] = 1;
+
+				//
 				// Round up to a buffer size worth of data, then add another
 				// buffer for room for future read calls.
+				//
 
-				// First, can this string handle potentially two more buffers worth of data?
-				// If not, that's an error.
+				// First, can this string handle potentially two more buffers
+				// worth of data without an integer overflow? If not, that's an
+				// error.
 				if ((SIZE_MAX - leftover_len) < MAX_BUF * 2 || simulate_error[1]) {
 					code_coverage[2] = 1;
 					free(line);
@@ -173,7 +198,7 @@ int readline(struct context* ctxt, char** outline) {
 		// Is there enough buffer space to read something reasonable? Otherwise, realloc more memory.
 		if ((ctxt->line_buffer_len - chars_cur_in_line_buf_not_inc_null_term) <= MAX_BUF / 2) {
 			code_coverage[6] = 1;
-		
+
 			// Can we represent more memory?
 			if ((SIZE_MAX - ctxt->line_buffer_len) < MAX_BUF || simulate_error[4]) {
 				code_coverage[7] = 1;
@@ -226,6 +251,10 @@ int readline(struct context* ctxt, char** outline) {
 	return 0;
 }
 
+//
+// This routine tests the readline routine by directing it to artificially
+// induce errors in itself.
+//
 int test_readline() {
 	char* line;
 	int i = 0;
@@ -255,6 +284,13 @@ int test_readline() {
 	return err;
 }
 
+//
+// This routine tests the line unfolding ability of the readandunfoldheaders
+// routine by artificially folding received lines at every valid opportunity.
+//
+// It acts as a filter in-between readandunfoldheaders and readline and has the
+// same function signature as readline.
+//
 int fold_line(struct context* ctxt, char** line) {
 	char* aspace;
 	char* ret;
@@ -290,6 +326,13 @@ int fold_line(struct context* ctxt, char** line) {
 	return 0;
 }
 
+//
+// This routine frees the memory allocated by readheaders. Normally this occurs
+// in parseheaders once it is done with them; however, in the case of an error,
+// readandunfoldheaders will also call this routine before returing to its
+// caller.
+// 
+//
 void freeheaders(char** headers) {
 	char **curheader = headers;
 	while (*curheader) {
@@ -299,6 +342,11 @@ void freeheaders(char** headers) {
 	free(headers);
 }
 
+//
+// This routine calls readline repeatedly assembling the results into an array
+// which it returns via outheaders. If an error is not returned, the caller is
+// responsible for freeing this array via a call to freeheaders.
+//
 int readheaders(struct context* ctxt, char*** outheaders) {
 	char* header;
 	char** headers;
@@ -346,6 +394,17 @@ int readheaders(struct context* ctxt, char*** outheaders) {
 	return 0;
 }
 
+//
+// This routine reads data from a TCP connection assuming it to be HTTP headers.
+// In then unfolds them if needed, and returns the unfolded headers (which are
+// ASCII newline terminated strings) in outheaders.
+// Outheaders points to an array of strings with the final element a pointer to
+// an empty string.
+//
+// If successful, it returns 0 and the caller is responsible for freeing each
+// string of the array and then the array itself. If not, it returns a POSIX
+// error code and outheaders is not modified. 
+//
 int readandunfoldheaders(struct context* ctxt, char*** outheaders) {
 	char **headers, **curheader, *foldedheader, **prevheader = NULL, *tmp;
 	int i = 0;
@@ -403,6 +462,14 @@ int readandunfoldheaders(struct context* ctxt, char*** outheaders) {
 	return 0;
 }
 
+//
+// This routine initializes a shared ctxt data structure used by routines which
+// serve clients webpages.
+//
+// Upon success, it returns 0 and populates outctxt.
+// Upon failure, it returns a POSIX error code and does not modify outcxtx.
+// If successful, the caller is responsible for freeing outctxt.
+//
 int init_lineparser(struct context** outctxt) {
 	struct context* ctxt = malloc(sizeof(struct context)); if (!ctxt) return ENOMEM;
 	ctxt->line_buffer = malloc(MAX_BUF);
@@ -422,6 +489,17 @@ int init_lineparser(struct context** outctxt) {
 	return 0;
 }
 
+//
+// This routine accepts a string containing an HTTP request and parses the
+// request action to see if it one supported by this server.
+//
+// In particular, if it is a HTTP GET request. If it is, it parses the request
+// URI and places it in ctxt->request_uri.
+//
+// It returns 0 upon success and a POSIX error on failure.
+// If it returns success, the caller is responsible for freeing
+// ctxt->request_uri
+//
 #define VERB_GET "GET "
 int parse_get(struct context* ctxt, char* header) {
 	char* next_token = NULL;
@@ -455,6 +533,16 @@ void parseheader(char* header) {
 	// Don't care about any other header for now.
 }
 
+//
+// This routine reads data from a TCP connection and attempts to parse it as
+// HTTP request headers.
+//
+// If successful, it populates ctxt with the header information.
+//
+// It returns 0 upon success, and a POSIX error on failure.
+// If it returns success, the caller is responsible for freeing
+// ctxt->request_uri.
+//
 int parseheaders(struct context* ctxt) {
 	int parsed_first_line = 0;
 	char **curheader, **headers;
@@ -489,6 +577,12 @@ int parseheaders(struct context* ctxt) {
 	return err;
 }
 
+//
+// This routine wraps the socket send call, repeatedly calling it until the
+// entire buffer data is sent, or an error occurs.
+//
+// It returns the same error values as the underlying send() call.
+//
 int sendall(SOCKET s, char* data, size_t len) {
 	int err;
 	int ret_send;
@@ -513,9 +607,15 @@ int sendall(SOCKET s, char* data, size_t len) {
 	return 0;
 }
 
+//
+// This routine serves an HTTP error status code.
+//
+// It expects ctxt->client to be valid.
+//
 void serveerr(struct context* ctxt, int err) {
 	char full_response[32];
 	int http_status_code;
+	assert(err != 0);
 	switch (err) {
 		case ENOSYS:
 			http_status_code = 501; // Not Implemented
@@ -538,6 +638,17 @@ void serveerr(struct context* ctxt, int err) {
 	printf(full_response);
 }
 
+//
+// This routine accepts a string (uri) and, if it is an HTTP URI, parses it into
+// its component pieces.
+//
+// Each of the pieces (out*) are optional and may be NULL if not needed.
+//
+// If successful, it returns 0. Otherwise, it returns a standard POSIX error.
+//
+// If successful and out* is not null, the caller is responsible for freeing the
+// value.
+//
 int format_uri(char* uri, char** outserver, int* outport, char** outpath, char** outcookedpath) {
 	char *server = NULL, *path = NULL, *cookedpath = NULL;
 	// Theoretically ports could be any length, but C isn't going to be able to
@@ -547,6 +658,13 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 	char *next_token = NULL;
 	char* token;
 	int tokens = 0;
+
+	size_t unconstrained_uri_buf_size = strlen(uri) + 1;
+	// sscanf_s's length parameters are unsigned int; if the URI string is larger than this, don't even try to parse it.
+	unsigned int uri_buf_size = (unsigned int)min(unconstrained_uri_buf_size, UINT_MAX);
+	if (unconstrained_uri_buf_size != uri_buf_size) {
+		return ERANGE;
+	}
 
 #define ERR_OUT(specific_err) {			\
 	err = specific_err;					\
@@ -568,10 +686,10 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 
 	// Each of the server and path could concievably require up to the full length
 	// of the incoming URI, so allocate that much memory just to be safe.
-	server = malloc(strlen(uri) + 1);
+	server = malloc(uri_buf_size);
 	CHECK_MALLOC(server);
 
-	path = malloc(strlen(uri) + 1);
+	path = malloc(uri_buf_size);
 	CHECK_MALLOC(path);
 
 	// Path can be any length, but the OS can only address MAX_PATH, so don't
@@ -584,28 +702,20 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 	APPEND_COOKED_PATH(WEBSITE_DIR);
 
 	// Try to parse a full HTTP path with port
-	args_converted = sscanf_s(
-		uri,
-		"http://%[^:/]:%[^/]/%s",
-		server,
-		(unsigned int)min(strlen(uri) + 1, UINT_MAX),
-		portstr,
-		(unsigned int)min(_countof(portstr), UINT_MAX),
-		path,
-		(unsigned int)min(strlen(uri) + 1, UINT_MAX));
-
+	C_ASSERT(_countof(portstr) < UINT_MAX);
+	args_converted = sscanf_s(uri, "http://%[^:/]:%[^/]/%s", server, uri_buf_size, portstr, (unsigned int)_countof(portstr), path, uri_buf_size);
 	if (args_converted == 3) {
 		port = atoi(portstr);
 	}
 	else {
 		// Try to parse a full HTTP path without port
-		args_converted = sscanf_s(uri, "http://%[^/]/%s", server, strlen(uri) + 1, path, strlen(uri) + 1);
+		args_converted = sscanf_s(uri, "http://%[^/]/%s", server, uri_buf_size, path, uri_buf_size);
 		if (args_converted == 2) {
 			port = 80;
 		}
 		else {
 			// Try to convert a relative path
-			args_converted = sscanf_s(uri, "/%s", path, strlen(uri) + 1);
+			args_converted = sscanf_s(uri, "/%s", path, uri_buf_size);
 			if (args_converted == 1 || strcmp(uri, "/") == 0) {
 				port = 80;
 				server[0] = '\0';
@@ -651,6 +761,19 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 	return 0;
 }
 
+//
+// This routine attempts to server a static website from disk to a network
+// client which made an HTTP 1.0 request.
+//
+// It expects ctxt to be populated by a previous call to parseheaders().
+//
+// It returns 0 on success, otherwise a standard POSIX error.
+// It also sets the attempt_to_serve_error variable depending on the nature of
+// the error.
+// If true, the socket connect is intact, and the caller may attempt to serve
+// other data (such as a 404 page). If not, it is broken and no further data
+// transfer is possible.
+//
 int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	// Things needing freeing
 	char *filename = NULL, *data = NULL;
@@ -681,8 +804,9 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	}
 
 	//printf("Serving %s\n", filename);
-	if (err = fopen_s(&fp, filename, "rb") || !fp) {
+	if ((err = fopen_s(&fp, filename, "rb")) || !fp) {
 		err = errno;
+		printf("file %s not found\n", filename);
 		FREE_THINGS();
 		return err;
 	}
@@ -693,7 +817,7 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 		return err;
 	}
 
-	if (file_size = ftell(fp) == -1) {
+	if ((file_size = ftell(fp)) == -1) {
 		err = errno;
 		FREE_THINGS();
 		return err;
@@ -738,7 +862,15 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	return 0;
 }
 
-void less_crappy_server() {
+//
+// This routine runs a simple webserver on localhost port 8080.
+//
+// For each connection received, it spawns a thread which runs the
+// client_thread routine.
+//
+// It never returns.
+//
+void simple_server() {
 	// Initialize Winsock.
 	WSADATA d = { 0 };
 	if (WSAStartup(MAKEWORD(2, 2), &d)) ERROR_EXIT("WSAStartup");
@@ -749,7 +881,7 @@ void less_crappy_server() {
 	struct sockaddr_in sa;
 	sa.sin_family = AF_INET;
 	sa.sin_port = htons(8080);
-	sa.sin_addr.s_addr = inet_addr("127.0.0.1");
+	sa.sin_addr.s_addr = inet_addr("0.0.0.0");
 	memset(sa.sin_zero, '\0', sizeof(sa.sin_zero));
 	if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) == -1) ERROR_EXIT("bind");
 
@@ -770,43 +902,37 @@ void less_crappy_server() {
 int main(int argc, char *argv[]) {
 	int err = 0;
 
-	if (!test) {
-		printf("Starting server in normal (non-test) mode.\n");
-		less_crappy_server();
-		return 0;
-	}
+#ifndef TESTING
 
-	// Test the server
-	
+	printf("Starting server in normal (non-test) mode.\n");
+	simple_server();
+	return 0;
+
+#else 
+
 	printf("Testing the server.\n");
 
 	printf("Testing readline() function.\n");
 	err = test_readline();
 	printf("done\n");
 
-	//int err, attempt_to_serve_error = 1;
-	//struct context* ctxt;
-
-	//crappy_server();
-	//err = init_lineparser(&ctxt);
-
-	//if (!err) {
-	//	err = parseheaders(ctxt);
-	//	if (!err) {
-	//		err = serve_document(ctxt, &attempt_to_serve_error);
-	//	}
-	//}
-
-	//if (err && attempt_to_serve_error) {
-	//	serveerr(ctxt, err);
-	//}
-
-	//printf("Done\n");
-	//closesocket(ctxt->client);
-
     return err;
+
+#endif
+
 }
 
+//
+// This routine runs from the thread spawned by simple_server in response to an
+// incoming TCP connection.
+//
+// It attemps to parse an HTTP request from a client and, if successful, return
+// a single static website.
+//
+// After doing so (successful or not), it exits and the thread terminates.
+//
+// It does not return a value.
+//
 void client_thread(void* thread_argument) {
 	SOCKET client = (SOCKET)thread_argument;
 
@@ -827,7 +953,6 @@ void client_thread(void* thread_argument) {
 		serveerr(ctxt, err);
 	}
 
-	//printf("Done\n");
 	closesocket(ctxt->client);
 	free(ctxt->line_buffer);
 	free(ctxt);
