@@ -356,15 +356,19 @@ int readheaders(struct context* ctxt, char*** outheaders) {
 	int err;
 	headers = malloc(MAX_BUF * sizeof(char*)); if (!headers) return ENOMEM;
 
+#define FREE_THINGS_RH()	\
+	headers[i] = NULL;		\
+	freeheaders(headers);	\
+
 	do {
-		if (i >= headers_len) {
+		if (i >= headers_len - 1) {
 			if (SIZE_MAX - headers_len * sizeof(char*) < MAX_BUF * sizeof(char*)) {
-				free(headers);
+				FREE_THINGS_RH();
 				return ERANGE;
 			}
 			newheaders = realloc(headers, (headers_len + MAX_BUF) * sizeof(char*));
 			if (!newheaders) {
-				free(headers);
+				FREE_THINGS_RH();
 				return ENOMEM;
 			}
 			headers = newheaders;
@@ -372,7 +376,7 @@ int readheaders(struct context* ctxt, char*** outheaders) {
 		}
 		err = fold_line(ctxt, &header);
 		if (err) {
-			free(headers);
+			FREE_THINGS_RH();
 			return err;
 		}
 		headers[i] = header;
@@ -438,7 +442,7 @@ int readandunfoldheaders(struct context* ctxt, char*** outheaders) {
 
 			newlen = strlen(*prevheader) + strlen(foldedheader) + 1;
 			tmp = realloc(*prevheader, newlen);
-			if (!*prevheader) { // Expand prevheader
+			if (!tmp) { // Expand prevheader
 				freeheaders(headers);
 				return ENOMEM;
 			}
@@ -780,7 +784,7 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	FILE* fp = NULL;
 	long file_size;
 
-#define FREE_THINGS() \
+#define FREE_THINGS_SD() \
 	if (filename) free(filename); \
 	if (data) free(data); \
 	if (fp) fclose(fp);
@@ -799,7 +803,7 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 
 	data = malloc(READ_CHUNK_SIZE);
 	if (!data) {
-		FREE_THINGS();
+		FREE_THINGS_SD();
 		return ENOMEM;
 	}
 
@@ -807,19 +811,19 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	if ((err = fopen_s(&fp, filename, "rb")) || !fp) {
 		err = errno;
 		printf("file %s not found\n", filename);
-		FREE_THINGS();
+		FREE_THINGS_SD();
 		return err;
 	}
 
 	if (err = fseek(fp, 0, SEEK_END)) {
 		err = errno;
-		FREE_THINGS();
+		FREE_THINGS_SD();
 		return err;
 	}
 
 	if ((file_size = ftell(fp)) == -1) {
 		err = errno;
-		FREE_THINGS();
+		FREE_THINGS_SD();
 		return err;
 	}
 
@@ -828,14 +832,14 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	printf("serve %s\n", filename);
 	sprintf_s(full_response, _countof(full_response), "HTTP/1.0 200 \r\n");
 	if (err = sendall(ctxt->client, full_response, strlen(full_response))) {
-		FREE_THINGS();
+		FREE_THINGS_SD();
 		*attempt_to_serve_error = 0;
 		return err;
 	}
 
 	sprintf_s(full_response, _countof(full_response), "Content-Length : %d \r\n\r\n", file_size);
 	if (err = sendall(ctxt->client, full_response, strlen(full_response))) {
-		FREE_THINGS();
+		FREE_THINGS_SD();
 		*attempt_to_serve_error = 0;
 		return err;
 	}
@@ -844,21 +848,21 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 		amt_read = fread(data, 1, READ_CHUNK_SIZE, fp);
 		ptr_send = data;
 		if (err = ferror(fp)) {
-			FREE_THINGS();
+			FREE_THINGS_SD();
 			*attempt_to_serve_error = 1;
 			return err;
 		}
 		if (amt_read) {
 			err = sendall(ctxt->client, data, amt_read);
 			if (err) {
-				FREE_THINGS();
+				FREE_THINGS_SD();
 				*attempt_to_serve_error = 0;
 				return err;
 			}
 		}
 	} while (amt_read != 0);
 
-	FREE_THINGS();
+	FREE_THINGS_SD();
 	return 0;
 }
 
