@@ -951,13 +951,14 @@ void client_thread(void* thread_argument) {
 			err = serve_document(ctxt, &attempt_to_serve_error);
 			free(ctxt->request_uri);
 		}
+
+		if (err && attempt_to_serve_error) {
+			serveerr(ctxt, err);
+		}
+
+		free(ctxt->line_buffer);
 	}
 
-	if (err && attempt_to_serve_error) {
-		serveerr(ctxt, err);
-	}
-
-	closesocket(ctxt->client);
-	free(ctxt->line_buffer);
+	closesocket(client);
 	free(ctxt);
 }
