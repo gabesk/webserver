@@ -14,6 +14,11 @@
 #include <process.h>
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <WinSock2.h>
+#include <time.h>
+
+FILE* logfile;
+char* iso8601time();
+void logweb(char* message, ...);
 
 //
 // Parameters for tuning webserver performance.
@@ -315,12 +320,16 @@ int fold_line(struct context* ctxt, char** line) {
 
 	aspace = strstr(ret, " ");
 	if (!aspace) {
+		free(ret);
 		return EINVAL;
 	}
+
 	ctxt->next = _strdup(aspace);
 	if (!ctxt->next) {
+		free(ret);
 		return ENOMEM; // Make a new line at the space character
 	}
+
 	*(aspace + 1) = '\0';
 	*line = ret;
 	return 0;
@@ -875,6 +884,10 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 // It never returns.
 //
 void simple_server() {
+	// Open logfile
+	int err = fopen_s(&logfile, "c:\\webserverdata\\log.txt", "a");
+	if (err) ERROR_EXIT("fopen log.txt");
+
 	// Initialize Winsock.
 	WSADATA d = { 0 };
 	if (WSAStartup(MAKEWORD(2, 2), &d)) ERROR_EXIT("WSAStartup");
@@ -938,6 +951,7 @@ int main(int argc, char *argv[]) {
 // It does not return a value.
 //
 void client_thread(void* thread_argument) {
+	logweb("New request");
 	SOCKET client = (SOCKET)thread_argument;
 
 	int err, attempt_to_serve_error = 1;
@@ -961,4 +975,72 @@ void client_thread(void* thread_argument) {
 
 	closesocket(client);
 	free(ctxt);
+}
+
+void logweb(char* message, ...) {
+	char* time = iso8601time();
+	int freetime = 1;
+	size_t fileline_len;
+	char* fileline = NULL;
+	int freeline = 0;
+
+	if (time == NULL) {
+		freetime = 0;
+		time = "Not enough memory to format timestamp";
+	}
+
+	if (SIZE_MAX - strlen(time) < 5 || SIZE_MAX - strlen(message) < strlen(time) + 5) { // Integer overflow
+		printf("Error: Log message too large to log. Skipping\n");
+		goto End;
+	}
+
+	fileline_len = strlen(time) + 5 + strlen(message);
+	fileline = malloc(fileline_len);
+	if (fileline == NULL) {
+		printf("Error: Not enough memory to format log message. Skipping.\n");
+		goto End;
+	}
+
+	freeline = 1;
+
+	sprintf_s(fileline, fileline_len, "%s : %s\n", time, message);
+	fwrite(fileline, 1, fileline_len, logfile);
+	printf(fileline);
+
+End:
+	if (freetime) free(time);
+	if (freeline) free(fileline);
+}
+
+char* iso8601time() {
+	struct tm tmNow;
+
+	// Get the current time
+	time_t now = time(NULL);
+	_localtime64_s(&tmNow, &now);
+
+	char* bufferTime = malloc(26);
+	if (bufferTime == NULL) {
+		return NULL;
+	}
+
+	char bufferTimezoneOffset[6];
+
+	// The current time formatted "2017-02-22T10:00:00"
+	size_t tsizTime = strftime(bufferTime, 26, "%Y-%m-%dT%H:%M:%S", &tmNow);
+
+	// The timezone offset -0500
+	size_t tsizOffset = strftime(bufferTimezoneOffset, 6, "%z", &tmNow);
+	
+	// Adds the hour part of the timezone offset
+	strncpy_s(&bufferTime[tsizTime], 26 - tsizTime, bufferTimezoneOffset, 3);
+	
+	// insert ':'
+	bufferTime[tsizTime + 3] = ':';
+	
+	// Adds the minutes part of the timezone offset
+	strncpy_s(&bufferTime[tsizTime + 4], 26 - tsizTime - 4, &bufferTimezoneOffset[3], 3);
+
+	// Output: "2017-02-22T10:00:00-05:00"
+	return bufferTime;
 }
