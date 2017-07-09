@@ -14,11 +14,13 @@
 #include <process.h>
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <WinSock2.h>
+#include <Ws2tcpip.h>
 #include <time.h>
 
 FILE* logfile;
 char* iso8601time();
 void logweb(char* message, ...);
+void log_clientconnection(SOCKET client);
 
 //
 // Parameters for tuning webserver performance.
@@ -648,7 +650,7 @@ void serveerr(struct context* ctxt, int err) {
 
 	sprintf_s(full_response, _countof(full_response), "HTTP/1.0 %d \r\n\r\n", http_status_code);
 	sendall(ctxt->client, full_response, strlen(full_response));
-	printf(full_response);
+	logweb(full_response);
 }
 
 //
@@ -819,7 +821,7 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	//printf("Serving %s\n", filename);
 	if ((err = fopen_s(&fp, filename, "rb")) || !fp) {
 		err = errno;
-		printf("file %s not found\n", filename);
+		logweb("file %s not found", filename);
 		FREE_THINGS_SD();
 		return err;
 	}
@@ -838,7 +840,7 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 
 	rewind(fp);
 
-	printf("serve %s\n", filename);
+	logweb("serving document %s", filename);
 	sprintf_s(full_response, _countof(full_response), "HTTP/1.0 200 \r\n");
 	if (err = sendall(ctxt->client, full_response, strlen(full_response))) {
 		FREE_THINGS_SD();
@@ -911,7 +913,7 @@ void simple_server() {
 	while (1) {
 		client = accept(s, (struct sockaddr*)&ta, &tas);
 		if (client == -1) ERROR_EXIT("accept");
-
+		log_clientconnection(client);
 		_beginthread(client_thread, 0, (void*)client);
 	}
 }
@@ -977,39 +979,74 @@ void client_thread(void* thread_argument) {
 	free(ctxt);
 }
 
-void logweb(char* message, ...) {
+void logweb(char* format, ...) {
 	char* time = iso8601time();
-	int freetime = 1;
 	size_t fileline_len;
 	char* fileline = NULL;
-	int freeline = 0;
 
 	if (time == NULL) {
-		freetime = 0;
 		time = "Not enough memory to format timestamp";
 	}
 
-	if (SIZE_MAX - strlen(time) < 5 || SIZE_MAX - strlen(message) < strlen(time) + 5) { // Integer overflow
+	va_list args;
+	int len;
+	char * buffer;
+
+	va_start(args, format);
+	if ((len = _vscprintf(format, args)) == -1) {
+		perror("logweb _vscprintf: invalid format string");
+		goto End;
+	}
+	
+	len += 1; // _vscprintf doesn't count terminating '\0'
+	if ((buffer = malloc(len * sizeof(char))) == NULL) {
+		printf("Error: Unable to allocate memory for log message. Skipping.\n");
+		goto End;
+	}
+
+	if (vsprintf_s(buffer, len, format, args) == -1) {
+		perror("logweb vsprintf_s invalid format string");
+		goto End;
+	}
+
+	if (SIZE_MAX - strlen(time) < 5 || SIZE_MAX - strlen(buffer) < strlen(time) + 5) { // Integer overflow
 		printf("Error: Log message too large to log. Skipping\n");
 		goto End;
 	}
 
-	fileline_len = strlen(time) + 5 + strlen(message);
+	fileline_len = strlen(time) + 5 + strlen(buffer);
 	fileline = malloc(fileline_len);
 	if (fileline == NULL) {
 		printf("Error: Not enough memory to format log message. Skipping.\n");
 		goto End;
 	}
 
-	freeline = 1;
+	sprintf_s(fileline, fileline_len, "%s : %s\n", time, buffer);
 
-	sprintf_s(fileline, fileline_len, "%s : %s\n", time, message);
 	fwrite(fileline, 1, fileline_len, logfile);
 	printf(fileline);
 
 End:
-	if (freetime) free(time);
-	if (freeline) free(fileline);
+	if (time) free(time);
+	if (buffer) free(buffer);
+	if (fileline) free(fileline);
+}
+
+void log_clientconnection(SOCKET client) {
+	struct sockaddr addr;
+	socklen_t addrlen = sizeof(addr);
+	if (getpeername(client, &addr, &addrlen) == -1) {
+		perror("getpeername(client)");
+		return;
+	}
+
+	char hbuf[NI_MAXHOST], sbuf[NI_MAXSERV];
+	if (getnameinfo(&addr, addrlen, hbuf, sizeof(hbuf), sbuf, sizeof(sbuf), NI_NUMERICHOST | NI_NUMERICSERV)) {
+		perror("getnameinfo(client)");
+		return;
+	}
+
+	logweb("New connection from %s:%s", hbuf, sbuf);
 }
 
 char* iso8601time() {
