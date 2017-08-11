@@ -3,19 +3,76 @@
 // files to clients.
 //
 
+#ifdef _WIN32
 #include <SDKDDKVer.h>
+#endif
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <tchar.h>
 #include <assert.h>
+#include <time.h>
+#include <limits.h>
+
+#ifdef _WIN32
+#include <tchar.h>
 #include <process.h>
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <WinSock2.h>
 #include <Ws2tcpip.h>
-#include <time.h>
+#else
+#define MAX_PATH 260
+#include <unistd.h>
+#include <netdb.h>
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <stdarg.h>
+#include <signal.h>
+#define SOCKET int
+#define max(a,b)            (((a) > (b)) ? (a) : (b))
+#define min(a,b)            (((a) < (b)) ? (a) : (b))
+#define _strdup strdup
+int strcat_s(char* dest, size_t size, char const* src) {
+	strcat(dest, src);
+	return 0;
+}
+int fopen_s(FILE**fp, char* filename, char* mode) {
+	*fp = fopen(filename, mode);
+	return errno;
+}
+int strncpy_s(char *dest, size_t destsz, char* src, size_t count) {
+	strncpy(dest, src, count);
+	return errno;
+}
+int _vscprintf (const char * format, va_list pargs) { 
+	int retval; 
+	va_list argcopy; 
+	va_copy(argcopy, pargs); 
+	retval = vsnprintf(NULL, 0, format, argcopy); 
+	va_end(argcopy); 
+	return retval; 
+}
+#define strtok_s(str, delim, ptr) strtok(str, delim)
+#define sprintf_s(a, b, ...) sprintf(a, __VA_ARGS__)
+#define C_ASSERT(...)
+#define _countof(s) (sizeof(s)/sizeof(s[0]))
+#define vsprintf_s(buffer, numberOfElements, format, argptr) vsprintf(buffer, format, argptr)
+#endif
+
+struct context {
+	char* line_buffer;
+	size_t line_buffer_len;
+
+	char* next;
+
+	SOCKET client;
+
+	char* request_uri;
+};
 
 FILE* logfile;
 char* iso8601time();
@@ -53,7 +110,11 @@ int test;
 
 #define NEWLINE "\r\n"
 #define HTTP_PREFIX "http://"
+#ifdef _WIN32
 #define WEBSITE_DIR "c:\\website"
+#else
+#define WEBSITE_DIR "./"
+#endif
 
 #define ERROR_EXIT(err_msg) { \
 	perror(err_msg); \
@@ -72,17 +133,6 @@ int gen_rand_data(char* buf, int len) {
 	}
 	return generated_amount;
 }
-
-struct context {
-	char* line_buffer;
-	size_t line_buffer_len;
-
-	char* next;
-
-	SOCKET client;
-
-	char* request_uri;
-};
 
 //
 // Reads a single line of data from a socket, returning the value in outline.
@@ -610,7 +660,11 @@ int sendall(SOCKET s, char* data, size_t len) {
 
 	do {
 		if ((ret_send = send(s, ptr_send, (int)min(left_to_send, INT_MAX), 0)) == -1) {
+#ifdef _WIN32
 			err = WSAGetLastError();
+#else
+			err = errno;
+#endif
 			return err;
 		}
 
@@ -718,19 +772,31 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 
 	// Try to parse a full HTTP path with port
 	C_ASSERT(_countof(portstr) < UINT_MAX);
+#ifdef _WIN32
 	args_converted = sscanf_s(uri, "http://%[^:/]:%[^/]/%s", server, uri_buf_size, portstr, (unsigned int)_countof(portstr), path, uri_buf_size);
+#else
+	args_converted = sscanf(uri, "http://%[^:/]:%[^/]/%s", server, portstr, path);
+#endif
 	if (args_converted == 3) {
 		port = atoi(portstr);
 	}
 	else {
 		// Try to parse a full HTTP path without port
+#ifdef _WIN32
 		args_converted = sscanf_s(uri, "http://%[^/]/%s", server, uri_buf_size, path, uri_buf_size);
+#else
+		args_converted = sscanf(uri, "http://%[^/]/%s", server, path);
+#endif
 		if (args_converted == 2) {
 			port = 80;
 		}
 		else {
 			// Try to convert a relative path
+#ifdef _WIN32
 			args_converted = sscanf_s(uri, "/%s", path, uri_buf_size);
+#else
+			args_converted = sscanf(uri, "/%s", path);
+#endif
 			if (args_converted == 1 || strcmp(uri, "/") == 0) {
 				port = 80;
 				server[0] = '\0';
@@ -754,7 +820,11 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 			ERR_OUT(ENOENT);
 		}
 
+#ifdef _WIN32
 		APPEND_COOKED_PATH("\\");
+#else
+		APPEND_COOKED_PATH("/");
+#endif
 		APPEND_COOKED_PATH(token);
 		token = strtok_s(NULL, "/", &next_token);
 		tokens++;
@@ -762,11 +832,19 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 
 	// If the URI is just a /, add the default document of index.html
 	if (tokens == 0) {
-		APPEND_COOKED_PATH("\\index.html");
+#ifdef _WIN32
+		APPEND_COOKED_PATH("\\");
+#else
+		APPEND_COOKED_PATH("/");
+#endif
+		APPEND_COOKED_PATH("index.html");
 	}
 
 	if (outserver) *outserver = server;
 	else free(server);
+
+	if (outpath) *outpath = path;
+	else free(path);
 
 	if (outport) *outport = port;
 
@@ -877,6 +955,13 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	return 0;
 }
 
+#ifndef _WIN32
+volatile sig_atomic_t flag_exit = 0;
+void handle_ctrlc(int sig) {
+	flag_exit = 1;
+}
+#endif
+
 //
 // This routine runs a simple webserver on localhost port 8080.
 //
@@ -887,12 +972,15 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 //
 void simple_server() {
 	// Open logfile
-	int err = fopen_s(&logfile, "c:\\webserverdata\\log.txt", "a");
+	int err = fopen_s(&logfile, "log.txt", "a");
 	if (err) ERROR_EXIT("fopen log.txt");
 
+#ifdef _WIN32
 	// Initialize Winsock.
 	WSADATA d = { 0 };
 	if (WSAStartup(MAKEWORD(2, 2), &d)) ERROR_EXIT("WSAStartup");
+#endif
+
 	SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
 	if (s == -1) ERROR_EXIT("socket");
 
@@ -912,9 +1000,22 @@ void simple_server() {
 	SOCKET client;
 	while (1) {
 		client = accept(s, (struct sockaddr*)&ta, &tas);
+#ifndef _WIN32
+		if (flag_exit) {
+			printf("Caught CTRL-C. Exiting.\n");
+			fclose(logfile);
+			return 0;
+		}
+#endif
+
 		if (client == -1) ERROR_EXIT("accept");
 		log_clientconnection(client);
+#ifdef _WIN32
 		_beginthread(client_thread, 0, (void*)client);
+#else
+		pthread_t thread;
+		pthread_create(&thread, NULL, client_thread, (void*)client);
+#endif
 	}
 }
 
@@ -923,6 +1024,13 @@ int main(int argc, char *argv[]) {
 
 #ifndef TESTING
 
+#ifndef _WIN32
+	struct sigaction a;
+	a.sa_handler = handle_ctrlc;
+	a.sa_flags = 0;
+	sigemptyset( &a.sa_mask );
+	sigaction( SIGINT, &a, NULL );
+#endif
 	printf("Starting server in normal (non-test) mode.\n");
 	simple_server();
 	return 0;
@@ -975,7 +1083,12 @@ void client_thread(void* thread_argument) {
 		free(ctxt->line_buffer);
 	}
 
+#ifdef _WIN32
 	closesocket(client);
+#else
+	close(client);
+#endif
+
 	free(ctxt);
 }
 
@@ -1054,7 +1167,11 @@ char* iso8601time() {
 
 	// Get the current time
 	time_t now = time(NULL);
+#ifdef _WIN32
 	_localtime64_s(&tmNow, &now);
+#else
+	localtime(&now);
+#endif
 
 	char* bufferTime = malloc(26);
 	if (bufferTime == NULL) {
