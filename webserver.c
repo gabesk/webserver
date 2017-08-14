@@ -1238,5 +1238,5 @@ End:
 	}
 
 	// Output: "2017-02-22T10:00:00-05:00"
-	return time_str;
+	return return_string;
 }
