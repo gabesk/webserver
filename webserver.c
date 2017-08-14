@@ -566,7 +566,9 @@ int init_lineparser(struct context** outctxt) {
 //
 #define VERB_GET "GET "
 int parse_get(struct context* ctxt, char* header) {
+#ifdef _WIN32
 	char* next_token = NULL;
+#endif
 	char* tok = strtok_s(header, " ", &next_token);
 	int i = 0;
 
@@ -723,7 +725,9 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 	// represent more than 64 bits anyway, so size it that large.
 	char portstr[32]; // 2^64 is 18446744073709551616 or 20 chars
 	int err, args_converted, port;
+#ifdef _WIN32
 	char *next_token = NULL;
+#endif
 	char* token;
 	int tokens = 0;
 
@@ -743,7 +747,7 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 	}
 
 #define APPEND_COOKED_PATH(src)										\
-	if (err = strcat_s(cookedpath, MAX_PATH, src)) {				\
+	if ((err = strcat_s(cookedpath, MAX_PATH, src))) {				\
 		ERR_OUT(err);												\
 	}
 
@@ -878,14 +882,14 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	if (fp) fclose(fp);
 
 	// Things not needing freeing
-	char full_response[32], *ptr_send;
+	char full_response[32];
 	size_t amt_read;
-	int err, amt_sent = 0;
+	int err;
 
 	// By default serve errors (socket errors will clear this)
 	*attempt_to_serve_error = 1;
 
-	if (err = format_uri(ctxt->request_uri, NULL, NULL, NULL, &filename)) {
+	if ((err = format_uri(ctxt->request_uri, NULL, NULL, NULL, &filename))) {
 		return ENOMEM;
 	}
 
@@ -903,7 +907,7 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 		return err;
 	}
 
-	if (err = fseek(fp, 0, SEEK_END)) {
+	if ((err = fseek(fp, 0, SEEK_END))) {
 		err = errno;
 		FREE_THINGS_SD();
 		return err;
@@ -919,14 +923,14 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 
 	logweb("serving document %s", filename);
 	sprintf_s(full_response, _countof(full_response), "HTTP/1.0 200 \r\n");
-	if (err = sendall(ctxt->client, full_response, strlen(full_response))) {
+	if ((err = sendall(ctxt->client, full_response, strlen(full_response)))) {
 		FREE_THINGS_SD();
 		*attempt_to_serve_error = 0;
 		return err;
 	}
 
 	sprintf_s(full_response, _countof(full_response), "Content-Length : %ld \r\n\r\n", file_size);
-	if (err = sendall(ctxt->client, full_response, strlen(full_response))) {
+	if ((err = sendall(ctxt->client, full_response, strlen(full_response)))) {
 		FREE_THINGS_SD();
 		*attempt_to_serve_error = 0;
 		return err;
@@ -934,8 +938,7 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 
 	do {
 		amt_read = fread(data, 1, READ_CHUNK_SIZE, fp);
-		ptr_send = data;
-		if (err = ferror(fp)) {
+		if ((err = ferror(fp))) {
 			FREE_THINGS_SD();
 			*attempt_to_serve_error = 1;
 			return err;
@@ -1043,7 +1046,12 @@ void simple_server() {
 	if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) == -1) ERROR_EXIT("bind");
 
 	struct sockaddr_storage ta;
+#ifdef _WIN32
 	int tas = sizeof(ta);
+#else
+	socklen_t tas = sizeof(ta);
+#endif
+
 	if (listen(s, 10) == -1) ERROR_EXIT("listen");
 
 	// Accept connections, creating a new thread for each.
@@ -1070,7 +1078,6 @@ void simple_server() {
 }
 
 int main(int argc, char *argv[]) {
-	int err = 0;
 
 #ifndef TESTING
 
@@ -1086,6 +1093,7 @@ int main(int argc, char *argv[]) {
 	return 0;
 
 #else 
+	int err = 0;
 
 	printf("Testing the server.\n");
 
