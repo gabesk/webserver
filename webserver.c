@@ -93,18 +93,24 @@ int code_coverage[64];
 int simulate_error[64];
 
 // #define TESTING
+// #define TEST_SMALL_BUFFERS
 
 #ifdef TESTING
+#define TEST_SMALL_BUFFERS
+int test = 1;
+#else
+int test;
+#endif
+
+#ifdef TEST_SMALL_BUFFERS
 
 #define MAX_BUF 13
 #define READ_CHUNK_SIZE 73
-int test = 1;
 
 #else
 
 #define MAX_BUF (1024*1024)
 #define READ_CHUNK_SIZE (64*1024)
-int test;
 
 #endif
 
