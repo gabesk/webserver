@@ -1093,44 +1093,44 @@ void client_thread(void* thread_argument) {
 }
 
 void logweb(char* format, ...) {
-	char* time = iso8601time();
 	size_t fileline_len;
 	char* fileline = NULL;
+	int len;
+	char * buffer = NULL;
 
+	char* time = iso8601time();
 	if (time == NULL) {
-		time = "Not enough memory to format timestamp";
+		perror("logweb: iso8601time: NULL");
+		goto End;
 	}
 
 	va_list args;
-	int len;
-	char * buffer;
-
 	va_start(args, format);
 	if ((len = _vscprintf(format, args)) == -1) {
-		perror("logweb _vscprintf: invalid format string");
+		perror("logweb: _vscprintf: invalid format string");
 		goto End;
 	}
 	
 	len += 1; // _vscprintf doesn't count terminating '\0'
 	if ((buffer = malloc(len * sizeof(char))) == NULL) {
-		printf("Error: Unable to allocate memory for log message. Skipping.\n");
+		printf("logweb: malloc(log message): NULL");
 		goto End;
 	}
 
 	if (vsprintf_s(buffer, len, format, args) == -1) {
-		perror("logweb vsprintf_s invalid format string");
+		perror("logweb: vsprintf_s: invalid format string");
 		goto End;
 	}
 
 	if (SIZE_MAX - strlen(time) < 5 || SIZE_MAX - strlen(buffer) < strlen(time) + 5) { // Integer overflow
-		printf("Error: Log message too large to log. Skipping\n");
+		printf("logweb: log message too large (integer overflow)");
 		goto End;
 	}
 
 	fileline_len = strlen(time) + 5 + strlen(buffer);
 	fileline = malloc(fileline_len);
 	if (fileline == NULL) {
-		printf("Error: Not enough memory to format log message. Skipping.\n");
+		printf("logweb: malloc(fileline): NULL");
 		goto End;
 	}
 
@@ -1149,52 +1149,79 @@ void log_clientconnection(SOCKET client) {
 	struct sockaddr addr;
 	socklen_t addrlen = sizeof(addr);
 	if (getpeername(client, &addr, &addrlen) == -1) {
-		perror("getpeername(client)");
+		perror("log_clientconnection: getpeername(client)");
 		return;
 	}
 
 	char hbuf[NI_MAXHOST], sbuf[NI_MAXSERV];
 	if (getnameinfo(&addr, addrlen, hbuf, sizeof(hbuf), sbuf, sizeof(sbuf), NI_NUMERICHOST | NI_NUMERICSERV)) {
-		perror("getnameinfo(client)");
+		perror("log_clientconnection: getnameinfo(client)");
 		return;
 	}
 
 	logweb("New connection from %s:%s", hbuf, sbuf);
 }
 
+// Returns the current time formatted according to ISO8601 as a string, or NULL upon failure.
+// If a non-NULL value is returned, the caller is responsible for freeing that memory.
 char* iso8601time() {
-	struct tm tmNow;
+	char* return_string = NULL;
 
-	// Get the current time
+	// Get the current time in milliseconds.
 	time_t now = time(NULL);
+
+	// Break it out into years, ... minutes, seconds.
+	struct tm now_parts;
 #ifdef _WIN32
-	_localtime64_s(&tmNow, &now);
+	_localtime64_s(&now_parts, &now);
 #else
-	localtime(&now);
+	localtime_r(&now, &now_parts);
 #endif
 
-	char* bufferTime = malloc(26);
-	if (bufferTime == NULL) {
-		return NULL;
+	// Allocate buf for ISO 8601 string representation.
+#define TIME_BUF_LEN 26
+	char* time_str = malloc(TIME_BUF_LEN);
+	if (time_str == NULL) {
+		goto End;
 	}
 
-	char bufferTimezoneOffset[6];
+	time_str[0] = '\0';
+
+	char timezone_off_str[6];
+	timezone_off_str[0] = '\0';
 
 	// The current time formatted "2017-02-22T10:00:00"
-	size_t tsizTime = strftime(bufferTime, 26, "%Y-%m-%dT%H:%M:%S", &tmNow);
+	size_t time_len = strftime(time_str, TIME_BUF_LEN, "%Y-%m-%dT%H:%M:%S", &now_parts);
+	if (!time_len) {
+		perror("iso8601time: strftime returned 0 for ISO8601 time format");
+		goto End;
+	}
 
-	// The timezone offset -0500
-	size_t tsizOffset = strftime(bufferTimezoneOffset, 6, "%z", &tmNow);
-	
+	// The timezone offset eg: "-0500"
+	size_t timezone_off_len = strftime(timezone_off_str, 6, "%z", &now_parts);
+	if (!timezone_off_len) {
+		perror("iso8601time: strftime returned 0 for ISO8601 time format");
+		goto End;
+	}
+
 	// Adds the hour part of the timezone offset
-	strncpy_s(&bufferTime[tsizTime], 26 - tsizTime, bufferTimezoneOffset, 3);
+	strncpy_s(&time_str[time_len], TIME_BUF_LEN - time_len, timezone_off_str, 3);
 	
 	// insert ':'
-	bufferTime[tsizTime + 3] = ':';
+	time_str[time_len + 3] = ':';
 	
 	// Adds the minutes part of the timezone offset
-	strncpy_s(&bufferTime[tsizTime + 4], 26 - tsizTime - 4, &bufferTimezoneOffset[3], 3);
+	strncpy_s(&time_str[time_len + 4], 26 - time_len - 4, &timezone_off_str[3], 3);
+
+	return_string = time_str;
+End:
+	if (!return_string) {
+		// Some error; clean up allocated memory.
+		if (time_str) {
+			free(time_str);
+		}
+	}
 
 	// Output: "2017-02-22T10:00:00-05:00"
-	return bufferTime;
+	return time_str;
 }
