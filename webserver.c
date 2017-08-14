@@ -121,7 +121,6 @@ int test;
 	exit(errno); \
 }
 
-void client_thread(void* thread_argument);
 int init_lineparser(struct context** outctxt);
 
 int gen_rand_data(char* buf, int len) {
@@ -926,7 +925,7 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 		return err;
 	}
 
-	sprintf_s(full_response, _countof(full_response), "Content-Length : %d \r\n\r\n", file_size);
+	sprintf_s(full_response, _countof(full_response), "Content-Length : %ld \r\n\r\n", file_size);
 	if (err = sendall(ctxt->client, full_response, strlen(full_response))) {
 		FREE_THINGS_SD();
 		*attempt_to_serve_error = 0;
@@ -953,6 +952,57 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 
 	FREE_THINGS_SD();
 	return 0;
+}
+
+//
+// This routine runs from the thread spawned by simple_server in response to an
+// incoming TCP connection.
+//
+// It attemps to parse an HTTP request from a client and, if successful, return
+// a single static website.
+//
+// After doing so (successful or not), it exits and the thread terminates.
+//
+// It does not return a value.
+//
+#ifdef _WIN32
+void client_thread(void* thread_argument) {
+#else
+void* client_thread(void* thread_argument) {
+#endif
+	logweb("New request");
+	SOCKET client = (SOCKET)(intptr_t)thread_argument;
+
+	int err, attempt_to_serve_error = 1;
+	struct context* ctxt;
+	err = init_lineparser(&ctxt);
+
+	if (!err) {
+		ctxt->client = client;
+		err = parseheaders(ctxt);
+		if (!err) {
+			err = serve_document(ctxt, &attempt_to_serve_error);
+			free(ctxt->request_uri);
+		}
+
+		if (err && attempt_to_serve_error) {
+			serveerr(ctxt, err);
+		}
+
+		free(ctxt->line_buffer);
+	}
+
+#ifdef _WIN32
+	closesocket(client);
+#else
+	close(client);
+#endif
+
+	free(ctxt);
+
+#ifndef _WIN32
+	return 0;
+#endif
 }
 
 #ifndef _WIN32
@@ -1004,7 +1054,7 @@ void simple_server() {
 		if (flag_exit) {
 			printf("Caught CTRL-C. Exiting.\n");
 			fclose(logfile);
-			return 0;
+			return;
 		}
 #endif
 
@@ -1014,7 +1064,7 @@ void simple_server() {
 		_beginthread(client_thread, 0, (void*)client);
 #else
 		pthread_t thread;
-		pthread_create(&thread, NULL, client_thread, (void*)client);
+		pthread_create(&thread, NULL, client_thread, (void*)(intptr_t)client);
 #endif
 	}
 }
@@ -1047,49 +1097,6 @@ int main(int argc, char *argv[]) {
 
 #endif
 
-}
-
-//
-// This routine runs from the thread spawned by simple_server in response to an
-// incoming TCP connection.
-//
-// It attemps to parse an HTTP request from a client and, if successful, return
-// a single static website.
-//
-// After doing so (successful or not), it exits and the thread terminates.
-//
-// It does not return a value.
-//
-void client_thread(void* thread_argument) {
-	logweb("New request");
-	SOCKET client = (SOCKET)thread_argument;
-
-	int err, attempt_to_serve_error = 1;
-	struct context* ctxt;
-	err = init_lineparser(&ctxt);
-
-	if (!err) {
-		ctxt->client = client;
-		err = parseheaders(ctxt);
-		if (!err) {
-			err = serve_document(ctxt, &attempt_to_serve_error);
-			free(ctxt->request_uri);
-		}
-
-		if (err && attempt_to_serve_error) {
-			serveerr(ctxt, err);
-		}
-
-		free(ctxt->line_buffer);
-	}
-
-#ifdef _WIN32
-	closesocket(client);
-#else
-	close(client);
-#endif
-
-	free(ctxt);
 }
 
 void logweb(char* format, ...) {
@@ -1137,7 +1144,7 @@ void logweb(char* format, ...) {
 	sprintf_s(fileline, fileline_len, "%s : %s\n", time, buffer);
 
 	fwrite(fileline, 1, fileline_len, logfile);
-	printf(fileline);
+	printf("%s", fileline);
 
 End:
 	if (time) free(time);
