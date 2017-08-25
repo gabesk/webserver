@@ -88,18 +88,21 @@ void log_clientconnection(SOCKET client);
 // Define TESTING to excercise test code instead of running the webserver.
 //
 
-#define TEST_ITERATIONS 10
+#define TEST_ITERATIONS 1
 int code_coverage[64];
 int simulate_error[64];
 
-// #define TESTING
+#define TESTING
 // #define TEST_SMALL_BUFFERS
 
 #ifdef TESTING
 #define TEST_SMALL_BUFFERS
 int test = 1;
+size_t test_size_max = SIZE_MAX;
+#define INTERNAL_SIZE_MAX test_size_max
 #else
 int test;
+#define INTERNAL_SIZE_MAX SIZE_MAX
 #endif
 
 #ifdef TEST_SMALL_BUFFERS
@@ -184,7 +187,11 @@ int readline(struct context* ctxt, char** outline) {
 			// Allocate enough for the buffer, including NULL terminator.
 			line = malloc(line_len + 1);
 			if (!line || simulate_error[0]) {
-				if (simulate_error[0]) free(line);
+				if (simulate_error[0]) {
+					free(line);
+					line = NULL;
+				}
+
 				code_coverage[0] = 1;
 				return ENOMEM;
 			}
@@ -212,7 +219,7 @@ int readline(struct context* ctxt, char** outline) {
 				// First, can this string handle potentially two more buffers
 				// worth of data without an integer overflow? If not, that's an
 				// error.
-				if ((SIZE_MAX - leftover_len) < MAX_BUF * 2 || simulate_error[1]) {
+				if ((INTERNAL_SIZE_MAX - leftover_len) < MAX_BUF * 2 || simulate_error[1]) {
 					code_coverage[2] = 1;
 					free(line);
 					return ERANGE;
@@ -221,7 +228,11 @@ int readline(struct context* ctxt, char** outline) {
 				new_line_buffer_len = (leftover_len / MAX_BUF + 2) * MAX_BUF;
 				new_line_buffer = malloc(new_line_buffer_len);
 				if (!new_line_buffer || simulate_error[2]) {
-					if (simulate_error[2]) free(new_line_buffer);
+					if (simulate_error[2]) {
+						free(new_line_buffer);
+						new_line_buffer = NULL;
+					}
+
 					code_coverage[3] = 1;
 					free(line);
 					return ENOMEM;
@@ -233,7 +244,11 @@ int readline(struct context* ctxt, char** outline) {
 			else {
 				new_line_buffer = malloc(MAX_BUF);
 				if (!new_line_buffer || simulate_error[3]) {
-					if (simulate_error[3]) free(new_line_buffer);
+					if (simulate_error[3]) {
+						free(new_line_buffer);
+						new_line_buffer = NULL;
+					}
+
 					code_coverage[4] = 1;
 					free(line);
 					return ENOMEM;
@@ -262,13 +277,18 @@ int readline(struct context* ctxt, char** outline) {
 			code_coverage[6] = 1;
 
 			// Can we represent more memory?
-			if ((SIZE_MAX - ctxt->line_buffer_len) < MAX_BUF || simulate_error[4]) {
+			if ((INTERNAL_SIZE_MAX - ctxt->line_buffer_len) < MAX_BUF || simulate_error[4]) {
 				code_coverage[7] = 1;
 				return ERANGE;
 			}
 
 			tmp = realloc(ctxt->line_buffer, ctxt->line_buffer_len + MAX_BUF);
 			if (!tmp || simulate_error[5]) {
+				if (simulate_error[5]) {
+					ctxt->line_buffer = tmp;
+					ctxt->line_buffer_len += MAX_BUF;
+				}
+
 				code_coverage[8] = 1;
 				return ENOMEM;
 			}
@@ -323,26 +343,57 @@ int test_readline() {
 	int j;
 	int err;
 	struct context* ctxt;
+	int total_coverage[64] = { 0 };
+	for (i = 0; i < TEST_ITERATIONS; i++) {
+		printf("Starting iteration %d.\n", i);
+		memset(&simulate_error, 0, sizeof(simulate_error[0]) * _countof(simulate_error));
+		for (j = 0; j < 8; j++) {
+			err = init_lineparser(&ctxt);
+			if (err) return err;
 
-	err = init_lineparser(&ctxt);
-	if (err) return err;
-
-	do {
-		if (i >= TEST_ITERATIONS) break;
-
-		err = readline(ctxt, &line);
-		if (err) return err;
-
-		for (j = 0; j < 7; j++) {
-			if (j != 0) simulate_error[j - 1] = 0;
-			simulate_error[j] = 1;
 			err = readline(ctxt, &line);
-			if (!err) return EBADMSG;
-		}
-		simulate_error[j] = 0;
-		i++;
-	} while (strlen(line) != 0);
+			if (err) return err;
+			free(line);
 
+			simulate_error[j] = 1;
+			printf("Simulating error %d.\n", j);
+
+			while (1) {
+				err = readline(ctxt, &line);
+				if (err) break;
+				free(line);
+			}
+
+			if (!err) {
+				printf("Test failed: %d\n", err);
+				return EBADMSG;
+			}
+
+			free(ctxt->line_buffer);
+			free(ctxt);
+			simulate_error[j] = 0;
+			for (int k = 0; k < 64; k++) {
+				total_coverage[k] |= code_coverage[k];
+			}
+		}
+
+		i++;
+	}
+
+	printf("Testing complete.\n");
+	for (int k = 0; k < 12; k++) {
+		if (!total_coverage[k]) {
+			printf("Code coverage missed branch %d.\n", k);
+			return EBADMSG;
+		}
+	}
+
+	if (total_coverage[12]) {
+		printf("Code reached unreachable branch.\n");
+		return EBADMSG;
+	}
+
+	printf("Success!\n");
 	return err;
 }
 
@@ -428,7 +479,7 @@ int readheaders(struct context* ctxt, char*** outheaders) {
 
 	do {
 		if (i >= headers_len - 1) {
-			if (SIZE_MAX - headers_len * sizeof(char*) < MAX_BUF * sizeof(char*)) {
+			if (INTERNAL_SIZE_MAX - headers_len * sizeof(char*) < MAX_BUF * sizeof(char*)) {
 				FREE_THINGS_RH();
 				return ERANGE;
 			}
@@ -501,7 +552,7 @@ int readandunfoldheaders(struct context* ctxt, char*** outheaders) {
 				return EINVAL;
 			}
 
-			if (SIZE_MAX - strlen(foldedheader) - 1 < strlen(*prevheader)) { // Int overflow check
+			if (INTERNAL_SIZE_MAX - strlen(foldedheader) - 1 < strlen(*prevheader)) { // Int overflow check
 				freeheaders(headers);
 				return ERANGE;
 			}
@@ -1105,7 +1156,7 @@ int main(int argc, char *argv[]) {
 
 	printf("Testing readline() function.\n");
 	err = test_readline();
-	printf("done\n");
+	printf("done err: %d.\n", err);
 
     return err;
 
@@ -1143,7 +1194,7 @@ void logweb(char* format, ...) {
 		goto End;
 	}
 
-	if (SIZE_MAX - strlen(time) < 5 || SIZE_MAX - strlen(buffer) < strlen(time) + 5) { // Integer overflow
+	if (INTERNAL_SIZE_MAX - strlen(time) < 5 || INTERNAL_SIZE_MAX - strlen(buffer) < strlen(time) + 5) { // Integer overflow
 		printf("logweb: log message too large (integer overflow)");
 		goto End;
 	}
