@@ -21,6 +21,7 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <WinSock2.h>
 #include <Ws2tcpip.h>
+#define FILE_DELIMITER "\\"
 #else
 #define MAX_PATH 260
 #include <unistd.h>
@@ -32,6 +33,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <signal.h>
+#define FILE_DELIMITER "/"
 #define SOCKET int
 #define max(a,b)            (((a) > (b)) ? (a) : (b))
 #define min(a,b)            (((a) < (b)) ? (a) : (b))
@@ -92,12 +94,12 @@ void log_clientconnection(SOCKET client);
 int code_coverage[64];
 int simulate_error[64];
 
-#define TESTING
+// #define TESTING
 // #define TEST_SMALL_BUFFERS
 
 #ifdef TESTING
 #define TEST_SMALL_BUFFERS
-int test = 1;
+int test_with_random_data = 1;
 size_t test_size_max = SIZE_MAX;
 #define INTERNAL_SIZE_MAX test_size_max
 #else
@@ -163,6 +165,7 @@ int gen_rand_data(char* buf, int len) {
 // It is designed to use as little memory as possible, which means that once a
 // line of data is returned to the caller, it only stores whatever is leftover
 // in a small buffer with only a small amount of extra room.
+//
 
 int readline(struct context* ctxt, char** outline) {
 	size_t amt_read, chars_cur_in_line_buf_not_inc_null_term;
@@ -298,16 +301,21 @@ int readline(struct context* ctxt, char** outline) {
 		}
 
 		code_coverage[9] = 1;
-		if (!test) {
+#ifdef TESTING
+		if (!test_with_random_data) {
+#endif
 			amt_read = recv(ctxt->client,
 				ctxt->line_buffer + line_buffer_terminator_offset,
 				(int)min(ctxt->line_buffer_len - chars_cur_in_line_buf_not_inc_null_term - 1, INT_MAX),
 				0);
+#ifdef TESTING
 		}
 		else {
 			amt_read = gen_rand_data(ctxt->line_buffer + line_buffer_terminator_offset,
 				(int)min(ctxt->line_buffer_len - chars_cur_in_line_buf_not_inc_null_term - 1, INT_MAX));
 		}
+#endif
+
 
 		if (amt_read == -1 || simulate_error[6]) {
 			// socket error
@@ -461,8 +469,11 @@ void freeheaders(char** headers) {
 
 //
 // This routine calls readline repeatedly assembling the results into an array
-// which it returns via outheaders. If an error is not returned, the caller is
-// responsible for freeing this array via a call to freeheaders.
+// (containing pointers to ASCII newline terminated strings) which it returns 
+// via outheaders. The array is terminated by a zero-length string as its final
+// element. If an error is not returned, the caller is responsible for freeing
+// this array via a call to freeheaders, which handles freeing not only the
+// array itself but also the strings pointed to by the array elements.
 //
 int readheaders(struct context* ctxt, char*** outheaders) {
 	char* header;
@@ -491,13 +502,19 @@ int readheaders(struct context* ctxt, char*** outheaders) {
 			headers = newheaders;
 			headers_len += MAX_BUF;
 		}
+#ifdef TESTING
 		err = fold_line(ctxt, &header);
+#else
+		err = readline(ctxt, &header);
+#endif
 		if (err) {
 			FREE_THINGS_RH();
 			return err;
 		}
 		headers[i] = header;
 		i++;
+		// Induce errors for testing by setting some elements to NULL and
+		// others to space to ensure that no errant behavior occurs in downstream code.
 		//if (!((i + 1) % 10)) {
 		//	header[0] = ' ';
 		//}
@@ -514,6 +531,12 @@ int readheaders(struct context* ctxt, char*** outheaders) {
 	*outheaders = headers;
 	return 0;
 }
+
+int code_coverage_ruh[64];
+int simulate_error_ruh[64];
+
+#define CODE_COV(index) code_coverage_ruh[index] = 1;
+
 
 //
 // This routine reads data from a TCP connection assuming it to be HTTP headers.
@@ -534,19 +557,26 @@ int readandunfoldheaders(struct context* ctxt, char*** outheaders) {
 
 	err = readheaders(ctxt, &headers);
 	if (err) {
+		CODE_COV(0);
 		return err;
 	}
 
 	curheader = headers;
 	while (**curheader) {
+		CODE_COV(1);
 		if (**curheader == ' ' || **curheader == '\t') { // This line belongs with the previous one
+			CODE_COV(2);
 			if (!prevheader) { // There must be a previous line to fold this header with or that's a client error.
+				CODE_COV(3);
 				freeheaders(headers);
 				return EINVAL;
 			}
 
 			foldedheader = *curheader;
-			while (*foldedheader == ' ' || *foldedheader == '\t') foldedheader++; // advance past whitespace
+			while (*foldedheader == ' ' || *foldedheader == '\t') {
+				CODE_COV(4);
+				foldedheader++; // advance past whitespace
+			}
 			if (!strlen(foldedheader)) { // If after skipping past the whitespace there's nothing left, that's also a client error.
 				freeheaders(headers);
 				return EINVAL;
@@ -880,11 +910,7 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 			ERR_OUT(ENOENT);
 		}
 
-#ifdef _WIN32
-		APPEND_COOKED_PATH("\\");
-#else
-		APPEND_COOKED_PATH("/");
-#endif
+		APPEND_COOKED_PATH(FILE_DELIMITER);
 		APPEND_COOKED_PATH(token);
 		token = strtok_s(NULL, "/", &next_token);
 		tokens++;
@@ -892,11 +918,7 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 
 	// If the URI is just a /, add the default document of index.html
 	if (tokens == 0) {
-#ifdef _WIN32
-		APPEND_COOKED_PATH("\\");
-#else
-		APPEND_COOKED_PATH("/");
-#endif
+		APPEND_COOKED_PATH(FILE_DELIMITER);
 		APPEND_COOKED_PATH("index.html");
 	}
 
