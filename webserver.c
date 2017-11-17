@@ -74,8 +74,6 @@ struct context {
 	SOCKET client;
 	char client_hostname[NI_MAXHOST];
 	char client_port[NI_MAXSERV];
-
-	char* request_uri;
 };
 
 FILE* logfile;
@@ -635,8 +633,6 @@ int init_lineparser(struct context** outctxt) {
 
 	ctxt->next = NULL;
 
-	ctxt->request_uri = NULL;
-
 	*outctxt = ctxt;
 	return 0;
 }
@@ -712,9 +708,9 @@ int parseheaders(struct context* ctxt, char** request_line, char** request_uri) 
 	while (*curheader) {
 		if (strlen(*curheader)) {
 			if (!parsed_first_line) {
-				err = parse_get(*curheader, &ctxt->request_uri);
+				err = parse_get(*curheader, request_uri);
 				if (err) {
-					if (ctxt->request_uri) free(ctxt->request_uri);
+					if (*request_uri) free(*request_uri);
 					freeheaders(headers);
 					return err;
 				}
@@ -995,7 +991,7 @@ void test_format_uri() {
 // other data (such as a 404 page). If not, it is broken and no further data
 // transfer is possible.
 //
-int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
+int serve_document(struct context* ctxt, char* request_uri, int* attempt_to_serve_error) {
 	// Things needing freeing
 	char *filename = NULL, *data = NULL;
 	FILE* fp = NULL;
@@ -1014,7 +1010,7 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	// By default serve errors (socket errors will clear this)
 	*attempt_to_serve_error = 1;
 
-	if ((err = format_uri(ctxt->request_uri, NULL, NULL, NULL, &filename))) {
+	if ((err = format_uri(request_uri, NULL, NULL, NULL, &filename))) {
 		return ENOMEM;
 	}
 
@@ -1110,7 +1106,7 @@ void* client_thread(void* thread_argument) {
 		char *request_line, *request_uri;
 		err = parseheaders(ctxt, &request_line, &request_uri);
 		if (!err) {
-			err = serve_document(ctxt, &attempt_to_serve_error);
+			err = serve_document(ctxt, request_uri, &attempt_to_serve_error);
 			free(request_line);
 			free(request_uri);
 		}
@@ -1392,8 +1388,8 @@ End:
 			free(time_str);
 		}
 
-		if (timezone_off_len) {
-			free(timezone_off_len);
+		if (timezone_off_str) {
+			free(timezone_off_str);
 		}
 	}
 
