@@ -1341,6 +1341,7 @@ char* iso8601time() {
 	// Allocate buf for ISO 8601 string representation.
 #define TIME_BUF_LEN 26
 	char* time_str = malloc(TIME_BUF_LEN);
+	char* timezone_off_str = NULL;
 	if (time_str == NULL) {
 		perror("iso8601time: unable to allocate memory for time_str");
 		goto End;
@@ -1348,7 +1349,7 @@ char* iso8601time() {
 
 	time_str[0] = '\0';
 
-	char* timezone_off_str = malloc(6);
+	timezone_off_str = malloc(6);
 	if (!timezone_off_str) {
 		free(time_str);
 		perror("iso8601time: unable to allocate memory for timezone_off_str");
