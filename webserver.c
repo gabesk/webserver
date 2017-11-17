@@ -98,11 +98,8 @@ int simulate_error[64];
 #ifdef TESTING
 #define TEST_SMALL_BUFFERS
 int test = 1;
-size_t test_size_max = SIZE_MAX;
-#define INTERNAL_SIZE_MAX test_size_max
 #else
 int test;
-#define INTERNAL_SIZE_MAX SIZE_MAX
 #endif
 
 #ifdef TEST_SMALL_BUFFERS
@@ -176,7 +173,7 @@ int readline(struct context* ctxt, char** outline) {
 		// Is there a complete line already in the line_buffer?
 		newline = strstr(ctxt->line_buffer, NEWLINE);
 		if (newline) {
-			// How many characters are in the line, not including \r\n?
+			// How many characters are in the line, not including NEWLINE?
 			line_len = newline - ctxt->line_buffer;
 
 			//
@@ -219,7 +216,7 @@ int readline(struct context* ctxt, char** outline) {
 				// First, can this string handle potentially two more buffers
 				// worth of data without an integer overflow? If not, that's an
 				// error.
-				if ((INTERNAL_SIZE_MAX - leftover_len) < MAX_BUF * 2 || simulate_error[1]) {
+				if ((SIZE_MAX - leftover_len) < MAX_BUF * 2 || simulate_error[1]) {
 					code_coverage[2] = 1;
 					free(line);
 					return ERANGE;
@@ -277,7 +274,7 @@ int readline(struct context* ctxt, char** outline) {
 			code_coverage[6] = 1;
 
 			// Can we represent more memory?
-			if ((INTERNAL_SIZE_MAX - ctxt->line_buffer_len) < MAX_BUF || simulate_error[4]) {
+			if ((SIZE_MAX - ctxt->line_buffer_len) < MAX_BUF || simulate_error[4]) {
 				code_coverage[7] = 1;
 				return ERANGE;
 			}
@@ -479,7 +476,7 @@ int readheaders(struct context* ctxt, char*** outheaders) {
 
 	do {
 		if (i >= headers_len - 1) {
-			if (INTERNAL_SIZE_MAX - headers_len * sizeof(char*) < MAX_BUF * sizeof(char*)) {
+			if (SIZE_MAX - headers_len * sizeof(char*) < MAX_BUF * sizeof(char*)) {
 				FREE_THINGS_RH();
 				return ERANGE;
 			}
@@ -552,7 +549,7 @@ int readandunfoldheaders(struct context* ctxt, char*** outheaders) {
 				return EINVAL;
 			}
 
-			if (INTERNAL_SIZE_MAX - strlen(foldedheader) - 1 < strlen(*prevheader)) { // Int overflow check
+			if (SIZE_MAX - strlen(foldedheader) - 1 < strlen(*prevheader)) { // Int overflow check
 				freeheaders(headers);
 				return ERANGE;
 			}
@@ -914,6 +911,43 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 	return 0;
 }
 
+
+
+void test_format_uri_inst(char* uri, char *expected_server, char *expected_path, char *expected_cookedpath, int expected_port, int expected_ret) {
+	char *server = NULL, *path = NULL, *cookedpath = NULL;
+	int port = 0, ret;
+
+	ret = format_uri(uri, &server, &port, &path, &cookedpath);
+
+	if (ret != expected_ret) printf("fail ret %d expected %d\n", ret, expected_ret);
+	if (ret) {
+		if (server) printf("fail ret but server not null\n");
+		if (path) printf("fail ret but path not null\n");
+		if (cookedpath) printf("fail ret but cookedpath not null\n");
+		return;
+	} 
+
+	if (strcmp(server, expected_server)) printf("fail server %s expected %s\n", server, expected_server);
+	if (port != expected_port) printf("fail port %d expected %d\n", port, expected_port);
+	if (strcmp(path, expected_path)) printf("fail path %s expected %s\n", path, expected_path);
+	if (strcmp(cookedpath, expected_cookedpath)) printf("fail cookedpath %s expected %s\n", cookedpath, expected_cookedpath);
+	free(server); free(path); free(cookedpath); server = NULL; path = NULL; cookedpath = NULL; port = 0;
+}
+
+void test_format_uri() {
+	test_format_uri_inst("/", "", "", "c:\\website\\index.html", 80, 0); // pass
+	test_format_uri_inst("/thing.html", "", "thing.html", "c:\\website\\thing.html", 80, 0); // pass
+	test_format_uri_inst("http://thing.html", "", "thing.html", "c:\\website\\thing.html", 80, EINVAL); // fail
+	test_format_uri_inst("http://server.com/thing.html", "server.com", "thing.html", "c:\\website\\thing.html", 80, 0); // pass
+	test_format_uri_inst("http://server.com", "server.com", "index.html", "c:\\website\\index.html", 80, EINVAL); // fail
+	test_format_uri_inst("http://server.com/", "server.com", "index.html", "c:\\website\\index.html", 80, EINVAL); // fail
+	test_format_uri_inst("http://server.com/index.html", "server.com", "index.html", "c:\\website\\index.html", 80, 0); // pass
+	test_format_uri_inst("http://server.com:80/index.html", "server.com", "index.html", "c:\\website\\index.html", 80, 0); // pass
+	test_format_uri_inst("http://server.com:8080/index.html", "server.com", "index.html", "c:\\website\\index.html", 8080, 0);
+	test_format_uri_inst("http://server.com:80808080/index.html", "server.com", "index.html", "c:\\website\\index.html", 80808080, 0);
+	test_format_uri_inst("http://server.com:80808080808080808080808080808080/index.html", "server.com", "index.html", "c:\\website\\index.html", 80808080, 0);
+}
+
 //
 // This routine attempts to server a static website from disk to a network
 // client which made an HTTP 1.0 request.
@@ -923,7 +957,7 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 // It returns 0 on success, otherwise a standard POSIX error.
 // It also sets the attempt_to_serve_error variable depending on the nature of
 // the error.
-// If true, the socket connect is intact, and the caller may attempt to serve
+// If true, the socket connection is intact, and the caller may attempt to serve
 // other data (such as a 404 page). If not, it is broken and no further data
 // transfer is possible.
 //
@@ -1158,6 +1192,10 @@ int main(int argc, char *argv[]) {
 	err = test_readline();
 	printf("done err: %d.\n", err);
 
+	printf("Testing format_uri() function.\n");
+	test_format_uri();
+	printf("done\n");
+
     return err;
 
 #endif
@@ -1194,7 +1232,7 @@ void logweb(char* format, ...) {
 		goto End;
 	}
 
-	if (INTERNAL_SIZE_MAX - strlen(time) < 5 || INTERNAL_SIZE_MAX - strlen(buffer) < strlen(time) + 5) { // Integer overflow
+	if (SIZE_MAX - strlen(time) < 5 || SIZE_MAX - strlen(buffer) < strlen(time) + 5) { // Integer overflow
 		printf("logweb: log message too large (integer overflow)");
 		goto End;
 	}
