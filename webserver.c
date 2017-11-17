@@ -80,6 +80,8 @@ struct context {
 	char* next;
 
 	SOCKET client;
+	char client_hostname[NI_MAXHOST];
+	char client_port[NI_MAXSERV];
 
 	char* request_uri;
 };
@@ -516,7 +518,7 @@ int init_lineparser(struct context** outctxt) {
 // ctxt->request_uri
 //
 #define VERB_GET "GET "
-int parse_get(struct context* ctxt, char* header) {
+int parse_get(char* header, char** request_uri) {
 	char* next_token = NULL;
 	char* tok = strtok_s(header, " ", &next_token);
 	int i = 0;
@@ -527,7 +529,7 @@ int parse_get(struct context* ctxt, char* header) {
 			if (strcmp("GET", tok)) return ENOSYS; // Only GET implemented
 			break;
 		case 1:
-			ctxt->request_uri = _strdup(tok); if (!ctxt->request_uri) return ENOMEM;
+			*request_uri = _strdup(tok); if (!*request_uri) return ENOMEM;
 			break;
 		case 2:
 			if (strstr(tok, "HTTP/") != tok) return EINVAL; // Should start with HTTP/ and the rest should parse as a float
@@ -540,7 +542,7 @@ int parse_get(struct context* ctxt, char* header) {
 		i++;
 	}
 
-	if (!ctxt->request_uri) return EINVAL; // Must supply a URI
+	if (!*request_uri) return EINVAL; // Must supply a URI
 	return 0;
 }
 
@@ -558,7 +560,7 @@ void parseheader(char* header) {
 // If it returns success, the caller is responsible for freeing
 // ctxt->request_uri.
 //
-int parseheaders(struct context* ctxt) {
+int parseheaders(struct context* ctxt, char** request_line, char** request_uri) {
 	int parsed_first_line = 0;
 	char **curheader, **headers;
 	int i = 0;
@@ -573,7 +575,7 @@ int parseheaders(struct context* ctxt) {
 	while (*curheader) {
 		if (strlen(*curheader)) {
 			if (!parsed_first_line) {
-				err = parse_get(ctxt, *curheader);
+				err = parse_get(*curheader, &ctxt->request_uri);
 				if (err) {
 					if (ctxt->request_uri) free(ctxt->request_uri);
 					freeheaders(headers);
@@ -622,6 +624,31 @@ int sendall(SOCKET s, char* data, size_t len) {
 	return 0;
 }
 
+int errno_to_http_status(int err) {
+	int http_status_code;
+	switch (err) {
+	case 0:
+		http_status_code = 200; // Success!
+		break;
+	case ENOSYS:
+		http_status_code = 501; // Not Implemented
+		break;
+	case ERANGE:
+		// ERANGE is returned if a memory allocation would result in an integer overflow.
+		// Any request that would require that much memory is almost certainly incorrect.
+		http_status_code = 400; // Bad Request
+		break;
+	case ENOENT:
+		http_status_code = 404; // Not Found
+		break;
+	default:
+		http_status_code = 503; // Service Unavailable
+		break;
+	}
+
+	return http_status_code;
+}
+
 //
 // This routine serves an HTTP error status code.
 //
@@ -629,25 +656,8 @@ int sendall(SOCKET s, char* data, size_t len) {
 //
 void serveerr(struct context* ctxt, int err) {
 	char full_response[32];
-	int http_status_code;
+	int http_status_code = errno_to_http_status(err);
 	assert(err != 0);
-	switch (err) {
-		case ENOSYS:
-			http_status_code = 501; // Not Implemented
-			break;
-		case ERANGE:
-			// ERANGE is returned if a memory allocation would result in an integer overflow.
-			// Any request that would require that much memory is almost certainly incorrect.
-			http_status_code = 400; // Bad Request
-			break;
-		case ENOENT:
-			http_status_code = 404; // Not Found
-			break;
-		default:
-			http_status_code = 503; // Service Unavailable
-			break;
-	}
-
 	sprintf_s(full_response, _countof(full_response), "HTTP/1.0 %d \r\n\r\n", http_status_code);
 	sendall(ctxt->client, full_response, strlen(full_response));
 	logweb(full_response);
@@ -941,6 +951,24 @@ int main(int argc, char *argv[]) {
 
 }
 
+int get_client_name(struct context* ctxt) {
+	struct sockaddr addr;
+	socklen_t addrlen = sizeof(addr);
+	if (getpeername(ctxt->client, &addr, &addrlen) == -1) {
+		perror("getpeername(client)");
+		if (errno) return errno;
+		else return EADDRNOTAVAIL;
+	}
+
+	if (getnameinfo(&addr, addrlen, ctxt->client_hostname, sizeof(ctxt->client_hostname), ctxt->client_port, sizeof(ctxt->client_port), NI_NUMERICHOST | NI_NUMERICSERV)) {
+		perror("getnameinfo(client)");
+		if (errno) return errno;
+		else return EADDRNOTAVAIL;
+	}
+
+	return 0;
+}
+
 //
 // This routine runs from the thread spawned by simple_server in response to an
 // incoming TCP connection.
@@ -956,22 +984,24 @@ void client_thread(void* thread_argument) {
 	logweb("New request");
 	SOCKET client = (SOCKET)thread_argument;
 
-	int err, attempt_to_serve_error = 1;
+	int err, attempt_to_serve_error = 1, free_request_uri = 0;
 	struct context* ctxt;
 	err = init_lineparser(&ctxt);
 
 	if (!err) {
 		ctxt->client = client;
-		err = parseheaders(ctxt);
-		if (!err) {
-			err = serve_document(ctxt, &attempt_to_serve_error);
-			free(ctxt->request_uri);
+		if (!(err = get_client_name(ctxt))) {
+			if (!(err = parseheaders(ctxt))) {
+				free_request_uri = 1;
+				err = serve_document(ctxt, &attempt_to_serve_error);
+			}
 		}
 
 		if (err && attempt_to_serve_error) {
 			serveerr(ctxt, err);
 		}
 
+		if (free_request_uri) free(ctxt->request_uri);
 		free(ctxt->line_buffer);
 	}
 
@@ -1013,7 +1043,7 @@ void logweb(char* format, ...) {
 		printf("Error: Log message too large to log. Skipping\n");
 		goto End;
 	}
-
+	
 	fileline_len = strlen(time) + 5 + strlen(buffer);
 	fileline = malloc(fileline_len);
 	if (fileline == NULL) {
@@ -1058,10 +1088,16 @@ char* iso8601time() {
 
 	char* bufferTime = malloc(26);
 	if (bufferTime == NULL) {
+		perror("iso8601time: unable to allocate memory for bufferTime");
 		return NULL;
 	}
 
-	char bufferTimezoneOffset[6];
+	char* bufferTimezoneOffset = malloc(6);
+	if (!bufferTimezoneOffset) {
+		free(bufferTime);
+		perror("iso8601time: unable to allocate memory for bufferTimezoneOffset");
+		return NULL;
+	}
 
 	// The current time formatted "2017-02-22T10:00:00"
 	size_t tsizTime = strftime(bufferTime, 26, "%Y-%m-%dT%H:%M:%S", &tmNow);
@@ -1080,4 +1116,23 @@ char* iso8601time() {
 
 	// Output: "2017-02-22T10:00:00-05:00"
 	return bufferTime;
+}
+
+void log_request(char* client_hostname, char* request_string, int status_code) {
+	// %v %h %l %u %t "%r" %>s %b.
+	// tarpon.gulf.net - - [12/Jan/1996:20:37:55 +0000] "GET index.htm ...
+	// hostname        - - time "request string first line" status code request size bytes
+	char* time = iso8601time();
+	if (!time) {
+		perror("log_request iso8601time");
+		return;
+	}
+
+	fprintf(logfile, "%s - - [%s] \"%s\" %d\n", client_hostname, time, request_string, status_code);
+
+	//fprintf()
+	//fwrite(fileline, 1, fileline_len, logfile);
+	//printf(fileline);
+	free(time);
+	return;
 }
