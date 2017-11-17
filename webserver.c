@@ -72,6 +72,8 @@ struct context {
 	char* next;
 
 	SOCKET client;
+	char client_hostname[NI_MAXHOST];
+	char client_port[NI_MAXSERV];
 
 	char* request_uri;
 };
@@ -142,19 +144,6 @@ int gen_rand_data(char* buf, int len) {
 	}
 	return generated_amount;
 }
-
-struct context {
-	char* line_buffer;
-	size_t line_buffer_len;
-
-	char* next;
-
-	SOCKET client;
-	char client_hostname[NI_MAXHOST];
-	char client_port[NI_MAXSERV];
-
-	char* request_uri;
-};
 
 //
 // Reads a single line of data from a socket, returning the value in outline.
@@ -664,12 +653,8 @@ int init_lineparser(struct context** outctxt) {
 // ctxt->request_uri
 //
 #define VERB_GET "GET "
-<<<<<<< HEAD
 int parse_get(char* header, char** request_uri) {
-=======
-int parse_get(struct context* ctxt, char* header) {
 #ifdef _WIN32
->>>>>>> da35d26168eb7adbfaf9eb8b654aa12475163441
 	char* next_token = NULL;
 #endif
 	char* tok = strtok_s(header, " ", &next_token);
@@ -1122,10 +1107,12 @@ void* client_thread(void* thread_argument) {
 
 	if (!err) {
 		ctxt->client = client;
-		err = parseheaders(ctxt);
+		char *request_line, *request_uri;
+		err = parseheaders(ctxt, &request_line, &request_uri);
 		if (!err) {
 			err = serve_document(ctxt, &attempt_to_serve_error);
-			free(ctxt->request_uri);
+			free(request_line);
+			free(request_uri);
 		}
 
 		if (err && attempt_to_serve_error) {
@@ -1251,7 +1238,6 @@ int main(int argc, char *argv[]) {
 
 }
 
-<<<<<<< HEAD
 int get_client_name(struct context* ctxt) {
 	struct sockaddr addr;
 	socklen_t addrlen = sizeof(addr);
@@ -1268,46 +1254,6 @@ int get_client_name(struct context* ctxt) {
 	}
 
 	return 0;
-}
-
-//
-// This routine runs from the thread spawned by simple_server in response to an
-// incoming TCP connection.
-//
-// It attemps to parse an HTTP request from a client and, if successful, return
-// a single static website.
-//
-// After doing so (successful or not), it exits and the thread terminates.
-//
-// It does not return a value.
-//
-void client_thread(void* thread_argument) {
-	logweb("New request");
-	SOCKET client = (SOCKET)thread_argument;
-
-	int err, attempt_to_serve_error = 1, free_request_uri = 0;
-	struct context* ctxt;
-	err = init_lineparser(&ctxt);
-
-	if (!err) {
-		ctxt->client = client;
-		if (!(err = get_client_name(ctxt))) {
-			if (!(err = parseheaders(ctxt))) {
-				free_request_uri = 1;
-				err = serve_document(ctxt, &attempt_to_serve_error);
-			}
-		}
-
-		if (err && attempt_to_serve_error) {
-			serveerr(ctxt, err);
-		}
-
-		if (free_request_uri) free(ctxt->request_uri);
-		free(ctxt->line_buffer);
-	}
-
-	closesocket(client);
-	free(ctxt);
 }
 
 void logweb(char* format, ...) {
@@ -1408,7 +1354,7 @@ char* iso8601time() {
 
 	char* timezone_off_str = malloc(6);
 	if (!timezone_off_str) {
-		free(bufferTime);
+		free(time_str);
 		perror("iso8601time: unable to allocate memory for timezone_off_str");
 		return NULL;
 	}
@@ -1448,10 +1394,11 @@ End:
 
 		if (timezone_off_len) {
 			free(timezone_off_len);
+		}
 	}
 
 	// Output: "2017-02-22T10:00:00-05:00"
-	return bufferTime;
+	return time_str;
 }
 
 void log_request(char* client_hostname, char* request_string, int status_code) {
