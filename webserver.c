@@ -3,19 +3,78 @@
 // files to clients.
 //
 
+#ifdef _WIN32
 #include <SDKDDKVer.h>
+#endif
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <tchar.h>
 #include <assert.h>
+#include <time.h>
+#include <limits.h>
+
+#ifdef _WIN32
+#include <tchar.h>
 #include <process.h>
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <WinSock2.h>
 #include <Ws2tcpip.h>
-#include <time.h>
+#define FILE_DELIMITER "\\"
+#else
+#define MAX_PATH 260
+#include <unistd.h>
+#include <netdb.h>
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <stdarg.h>
+#include <signal.h>
+#define FILE_DELIMITER "/"
+#define SOCKET int
+#define max(a,b)            (((a) > (b)) ? (a) : (b))
+#define min(a,b)            (((a) < (b)) ? (a) : (b))
+#define _strdup strdup
+int strcat_s(char* dest, size_t size, char const* src) {
+	strcat(dest, src);
+	return 0;
+}
+int fopen_s(FILE**fp, char* filename, char* mode) {
+	*fp = fopen(filename, mode);
+	return errno;
+}
+int strncpy_s(char *dest, size_t destsz, char* src, size_t count) {
+	strncpy(dest, src, count);
+	return errno;
+}
+int _vscprintf (const char * format, va_list pargs) { 
+	int retval; 
+	va_list argcopy; 
+	va_copy(argcopy, pargs); 
+	retval = vsnprintf(NULL, 0, format, argcopy); 
+	va_end(argcopy); 
+	return retval; 
+}
+#define strtok_s(str, delim, ptr) strtok(str, delim)
+#define sprintf_s(a, b, ...) sprintf(a, __VA_ARGS__)
+#define C_ASSERT(...)
+#define _countof(s) (sizeof(s)/sizeof(s[0]))
+#define vsprintf_s(buffer, numberOfElements, format, argptr) vsprintf(buffer, format, argptr)
+#endif
+
+struct context {
+	char* line_buffer;
+	size_t line_buffer_len;
+
+	char* next;
+
+	SOCKET client;
+
+	char* request_uri;
+};
 
 FILE* logfile;
 char* iso8601time();
@@ -31,36 +90,47 @@ void log_clientconnection(SOCKET client);
 // Define TESTING to excercise test code instead of running the webserver.
 //
 
-#define TEST_ITERATIONS 10
+#define TEST_ITERATIONS 1
 int code_coverage[64];
 int simulate_error[64];
 
 // #define TESTING
+// #define TEST_SMALL_BUFFERS
 
 #ifdef TESTING
+#define TEST_SMALL_BUFFERS
+int test_with_random_data = 1;
+size_t test_size_max = SIZE_MAX;
+#define INTERNAL_SIZE_MAX test_size_max
+#else
+int test_with_random_data = 0;
+#endif
+
+#ifdef TEST_SMALL_BUFFERS
 
 #define MAX_BUF 13
 #define READ_CHUNK_SIZE 73
-int test = 1;
 
 #else
 
 #define MAX_BUF (1024*1024)
 #define READ_CHUNK_SIZE (64*1024)
-int test;
 
 #endif
 
 #define NEWLINE "\r\n"
 #define HTTP_PREFIX "http://"
+#ifdef _WIN32
 #define WEBSITE_DIR "c:\\website"
+#else
+#define WEBSITE_DIR "./"
+#endif
 
 #define ERROR_EXIT(err_msg) { \
 	perror(err_msg); \
 	exit(errno); \
 }
 
-void client_thread(void* thread_argument);
 int init_lineparser(struct context** outctxt);
 
 int gen_rand_data(char* buf, int len) {
@@ -107,6 +177,7 @@ struct context {
 // It is designed to use as little memory as possible, which means that once a
 // line of data is returned to the caller, it only stores whatever is leftover
 // in a small buffer with only a small amount of extra room.
+//
 
 int readline(struct context* ctxt, char** outline) {
 	size_t amt_read, chars_cur_in_line_buf_not_inc_null_term;
@@ -120,7 +191,7 @@ int readline(struct context* ctxt, char** outline) {
 		// Is there a complete line already in the line_buffer?
 		newline = strstr(ctxt->line_buffer, NEWLINE);
 		if (newline) {
-			// How many characters are in the line, not including \r\n?
+			// How many characters are in the line, not including NEWLINE?
 			line_len = newline - ctxt->line_buffer;
 
 			//
@@ -131,7 +202,11 @@ int readline(struct context* ctxt, char** outline) {
 			// Allocate enough for the buffer, including NULL terminator.
 			line = malloc(line_len + 1);
 			if (!line || simulate_error[0]) {
-				if (simulate_error[0]) free(line);
+				if (simulate_error[0]) {
+					free(line);
+					line = NULL;
+				}
+
 				code_coverage[0] = 1;
 				return ENOMEM;
 			}
@@ -168,7 +243,11 @@ int readline(struct context* ctxt, char** outline) {
 				new_line_buffer_len = (leftover_len / MAX_BUF + 2) * MAX_BUF;
 				new_line_buffer = malloc(new_line_buffer_len);
 				if (!new_line_buffer || simulate_error[2]) {
-					if (simulate_error[2]) free(new_line_buffer);
+					if (simulate_error[2]) {
+						free(new_line_buffer);
+						new_line_buffer = NULL;
+					}
+
 					code_coverage[3] = 1;
 					free(line);
 					return ENOMEM;
@@ -180,7 +259,11 @@ int readline(struct context* ctxt, char** outline) {
 			else {
 				new_line_buffer = malloc(MAX_BUF);
 				if (!new_line_buffer || simulate_error[3]) {
-					if (simulate_error[3]) free(new_line_buffer);
+					if (simulate_error[3]) {
+						free(new_line_buffer);
+						new_line_buffer = NULL;
+					}
+
 					code_coverage[4] = 1;
 					free(line);
 					return ENOMEM;
@@ -216,6 +299,11 @@ int readline(struct context* ctxt, char** outline) {
 
 			tmp = realloc(ctxt->line_buffer, ctxt->line_buffer_len + MAX_BUF);
 			if (!tmp || simulate_error[5]) {
+				if (simulate_error[5]) {
+					ctxt->line_buffer = tmp;
+					ctxt->line_buffer_len += MAX_BUF;
+				}
+
 				code_coverage[8] = 1;
 				return ENOMEM;
 			}
@@ -225,16 +313,21 @@ int readline(struct context* ctxt, char** outline) {
 		}
 
 		code_coverage[9] = 1;
-		if (!test) {
+#ifdef TESTING
+		if (!test_with_random_data) {
+#endif
 			amt_read = recv(ctxt->client,
 				ctxt->line_buffer + line_buffer_terminator_offset,
 				(int)min(ctxt->line_buffer_len - chars_cur_in_line_buf_not_inc_null_term - 1, INT_MAX),
 				0);
+#ifdef TESTING
 		}
 		else {
 			amt_read = gen_rand_data(ctxt->line_buffer + line_buffer_terminator_offset,
 				(int)min(ctxt->line_buffer_len - chars_cur_in_line_buf_not_inc_null_term - 1, INT_MAX));
 		}
+#endif
+
 
 		if (amt_read == -1 || simulate_error[6]) {
 			// socket error
@@ -270,26 +363,57 @@ int test_readline() {
 	int j;
 	int err;
 	struct context* ctxt;
+	int total_coverage[64] = { 0 };
+	for (i = 0; i < TEST_ITERATIONS; i++) {
+		printf("Starting iteration %d.\n", i);
+		memset(&simulate_error, 0, sizeof(simulate_error[0]) * _countof(simulate_error));
+		for (j = 0; j < 8; j++) {
+			err = init_lineparser(&ctxt);
+			if (err) return err;
 
-	err = init_lineparser(&ctxt);
-	if (err) return err;
-
-	do {
-		if (i >= TEST_ITERATIONS) break;
-
-		err = readline(ctxt, &line);
-		if (err) return err;
-
-		for (j = 0; j < 7; j++) {
-			if (j != 0) simulate_error[j - 1] = 0;
-			simulate_error[j] = 1;
 			err = readline(ctxt, &line);
-			if (!err) return EBADMSG;
-		}
-		simulate_error[j] = 0;
-		i++;
-	} while (strlen(line) != 0);
+			if (err) return err;
+			free(line);
 
+			simulate_error[j] = 1;
+			printf("Simulating error %d.\n", j);
+
+			while (1) {
+				err = readline(ctxt, &line);
+				if (err) break;
+				free(line);
+			}
+
+			if (!err) {
+				printf("Test failed: %d\n", err);
+				return EBADMSG;
+			}
+
+			free(ctxt->line_buffer);
+			free(ctxt);
+			simulate_error[j] = 0;
+			for (int k = 0; k < 64; k++) {
+				total_coverage[k] |= code_coverage[k];
+			}
+		}
+
+		i++;
+	}
+
+	printf("Testing complete.\n");
+	for (int k = 0; k < 12; k++) {
+		if (!total_coverage[k]) {
+			printf("Code coverage missed branch %d.\n", k);
+			return EBADMSG;
+		}
+	}
+
+	if (total_coverage[12]) {
+		printf("Code reached unreachable branch.\n");
+		return EBADMSG;
+	}
+
+	printf("Success!\n");
 	return err;
 }
 
@@ -357,8 +481,11 @@ void freeheaders(char** headers) {
 
 //
 // This routine calls readline repeatedly assembling the results into an array
-// which it returns via outheaders. If an error is not returned, the caller is
-// responsible for freeing this array via a call to freeheaders.
+// (containing pointers to ASCII newline terminated strings) which it returns 
+// via outheaders. The array is terminated by a zero-length string as its final
+// element. If an error is not returned, the caller is responsible for freeing
+// this array via a call to freeheaders, which handles freeing not only the
+// array itself but also the strings pointed to by the array elements.
 //
 int readheaders(struct context* ctxt, char*** outheaders) {
 	char* header;
@@ -387,13 +514,19 @@ int readheaders(struct context* ctxt, char*** outheaders) {
 			headers = newheaders;
 			headers_len += MAX_BUF;
 		}
+#ifdef TESTING
 		err = fold_line(ctxt, &header);
+#else
+		err = readline(ctxt, &header);
+#endif
 		if (err) {
 			FREE_THINGS_RH();
 			return err;
 		}
 		headers[i] = header;
 		i++;
+		// Induce errors for testing by setting some elements to NULL and
+		// others to space to ensure that no errant behavior occurs in downstream code.
 		//if (!((i + 1) % 10)) {
 		//	header[0] = ' ';
 		//}
@@ -410,6 +543,12 @@ int readheaders(struct context* ctxt, char*** outheaders) {
 	*outheaders = headers;
 	return 0;
 }
+
+int code_coverage_ruh[64];
+int simulate_error_ruh[64];
+
+#define CODE_COV(index) code_coverage_ruh[index] = 1;
+
 
 //
 // This routine reads data from a TCP connection assuming it to be HTTP headers.
@@ -430,19 +569,26 @@ int readandunfoldheaders(struct context* ctxt, char*** outheaders) {
 
 	err = readheaders(ctxt, &headers);
 	if (err) {
+		CODE_COV(0);
 		return err;
 	}
 
 	curheader = headers;
 	while (**curheader) {
+		CODE_COV(1);
 		if (**curheader == ' ' || **curheader == '\t') { // This line belongs with the previous one
+			CODE_COV(2);
 			if (!prevheader) { // There must be a previous line to fold this header with or that's a client error.
+				CODE_COV(3);
 				freeheaders(headers);
 				return EINVAL;
 			}
 
 			foldedheader = *curheader;
-			while (*foldedheader == ' ' || *foldedheader == '\t') foldedheader++; // advance past whitespace
+			while (*foldedheader == ' ' || *foldedheader == '\t') {
+				CODE_COV(4);
+				foldedheader++; // advance past whitespace
+			}
 			if (!strlen(foldedheader)) { // If after skipping past the whitespace there's nothing left, that's also a client error.
 				freeheaders(headers);
 				return EINVAL;
@@ -518,8 +664,14 @@ int init_lineparser(struct context** outctxt) {
 // ctxt->request_uri
 //
 #define VERB_GET "GET "
+<<<<<<< HEAD
 int parse_get(char* header, char** request_uri) {
+=======
+int parse_get(struct context* ctxt, char* header) {
+#ifdef _WIN32
+>>>>>>> da35d26168eb7adbfaf9eb8b654aa12475163441
 	char* next_token = NULL;
+#endif
 	char* tok = strtok_s(header, " ", &next_token);
 	int i = 0;
 
@@ -612,7 +764,11 @@ int sendall(SOCKET s, char* data, size_t len) {
 
 	do {
 		if ((ret_send = send(s, ptr_send, (int)min(left_to_send, INT_MAX), 0)) == -1) {
+#ifdef _WIN32
 			err = WSAGetLastError();
+#else
+			err = errno;
+#endif
 			return err;
 		}
 
@@ -680,7 +836,9 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 	// represent more than 64 bits anyway, so size it that large.
 	char portstr[32]; // 2^64 is 18446744073709551616 or 20 chars
 	int err, args_converted, port;
+#ifdef _WIN32
 	char *next_token = NULL;
+#endif
 	char* token;
 	int tokens = 0;
 
@@ -700,7 +858,7 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 	}
 
 #define APPEND_COOKED_PATH(src)										\
-	if (err = strcat_s(cookedpath, MAX_PATH, src)) {				\
+	if ((err = strcat_s(cookedpath, MAX_PATH, src))) {				\
 		ERR_OUT(err);												\
 	}
 
@@ -728,19 +886,31 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 
 	// Try to parse a full HTTP path with port
 	C_ASSERT(_countof(portstr) < UINT_MAX);
+#ifdef _WIN32
 	args_converted = sscanf_s(uri, "http://%[^:/]:%[^/]/%s", server, uri_buf_size, portstr, (unsigned int)_countof(portstr), path, uri_buf_size);
+#else
+	args_converted = sscanf(uri, "http://%[^:/]:%[^/]/%s", server, portstr, path);
+#endif
 	if (args_converted == 3) {
 		port = atoi(portstr);
 	}
 	else {
 		// Try to parse a full HTTP path without port
+#ifdef _WIN32
 		args_converted = sscanf_s(uri, "http://%[^/]/%s", server, uri_buf_size, path, uri_buf_size);
+#else
+		args_converted = sscanf(uri, "http://%[^/]/%s", server, path);
+#endif
 		if (args_converted == 2) {
 			port = 80;
 		}
 		else {
 			// Try to convert a relative path
+#ifdef _WIN32
 			args_converted = sscanf_s(uri, "/%s", path, uri_buf_size);
+#else
+			args_converted = sscanf(uri, "/%s", path);
+#endif
 			if (args_converted == 1 || strcmp(uri, "/") == 0) {
 				port = 80;
 				server[0] = '\0';
@@ -764,7 +934,7 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 			ERR_OUT(ENOENT);
 		}
 
-		APPEND_COOKED_PATH("\\");
+		APPEND_COOKED_PATH(FILE_DELIMITER);
 		APPEND_COOKED_PATH(token);
 		token = strtok_s(NULL, "/", &next_token);
 		tokens++;
@@ -772,11 +942,15 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 
 	// If the URI is just a /, add the default document of index.html
 	if (tokens == 0) {
-		APPEND_COOKED_PATH("\\index.html");
+		APPEND_COOKED_PATH(FILE_DELIMITER);
+		APPEND_COOKED_PATH("index.html");
 	}
 
 	if (outserver) *outserver = server;
 	else free(server);
+
+	if (outpath) *outpath = path;
+	else free(path);
 
 	if (outport) *outport = port;
 
@@ -784,6 +958,43 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 	else free(cookedpath);
 
 	return 0;
+}
+
+
+
+void test_format_uri_inst(char* uri, char *expected_server, char *expected_path, char *expected_cookedpath, int expected_port, int expected_ret) {
+	char *server = NULL, *path = NULL, *cookedpath = NULL;
+	int port = 0, ret;
+
+	ret = format_uri(uri, &server, &port, &path, &cookedpath);
+
+	if (ret != expected_ret) printf("fail ret %d expected %d\n", ret, expected_ret);
+	if (ret) {
+		if (server) printf("fail ret but server not null\n");
+		if (path) printf("fail ret but path not null\n");
+		if (cookedpath) printf("fail ret but cookedpath not null\n");
+		return;
+	} 
+
+	if (strcmp(server, expected_server)) printf("fail server %s expected %s\n", server, expected_server);
+	if (port != expected_port) printf("fail port %d expected %d\n", port, expected_port);
+	if (strcmp(path, expected_path)) printf("fail path %s expected %s\n", path, expected_path);
+	if (strcmp(cookedpath, expected_cookedpath)) printf("fail cookedpath %s expected %s\n", cookedpath, expected_cookedpath);
+	free(server); free(path); free(cookedpath); server = NULL; path = NULL; cookedpath = NULL; port = 0;
+}
+
+void test_format_uri() {
+	test_format_uri_inst("/", "", "", "c:\\website\\index.html", 80, 0); // pass
+	test_format_uri_inst("/thing.html", "", "thing.html", "c:\\website\\thing.html", 80, 0); // pass
+	test_format_uri_inst("http://thing.html", "", "thing.html", "c:\\website\\thing.html", 80, EINVAL); // fail
+	test_format_uri_inst("http://server.com/thing.html", "server.com", "thing.html", "c:\\website\\thing.html", 80, 0); // pass
+	test_format_uri_inst("http://server.com", "server.com", "index.html", "c:\\website\\index.html", 80, EINVAL); // fail
+	test_format_uri_inst("http://server.com/", "server.com", "index.html", "c:\\website\\index.html", 80, EINVAL); // fail
+	test_format_uri_inst("http://server.com/index.html", "server.com", "index.html", "c:\\website\\index.html", 80, 0); // pass
+	test_format_uri_inst("http://server.com:80/index.html", "server.com", "index.html", "c:\\website\\index.html", 80, 0); // pass
+	test_format_uri_inst("http://server.com:8080/index.html", "server.com", "index.html", "c:\\website\\index.html", 8080, 0);
+	test_format_uri_inst("http://server.com:80808080/index.html", "server.com", "index.html", "c:\\website\\index.html", 80808080, 0);
+	test_format_uri_inst("http://server.com:80808080808080808080808080808080/index.html", "server.com", "index.html", "c:\\website\\index.html", 80808080, 0);
 }
 
 //
@@ -795,7 +1006,7 @@ int format_uri(char* uri, char** outserver, int* outport, char** outpath, char**
 // It returns 0 on success, otherwise a standard POSIX error.
 // It also sets the attempt_to_serve_error variable depending on the nature of
 // the error.
-// If true, the socket connect is intact, and the caller may attempt to serve
+// If true, the socket connection is intact, and the caller may attempt to serve
 // other data (such as a 404 page). If not, it is broken and no further data
 // transfer is possible.
 //
@@ -811,14 +1022,14 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 	if (fp) fclose(fp);
 
 	// Things not needing freeing
-	char full_response[32], *ptr_send;
+	char full_response[32];
 	size_t amt_read;
-	int err, amt_sent = 0;
+	int err;
 
 	// By default serve errors (socket errors will clear this)
 	*attempt_to_serve_error = 1;
 
-	if (err = format_uri(ctxt->request_uri, NULL, NULL, NULL, &filename)) {
+	if ((err = format_uri(ctxt->request_uri, NULL, NULL, NULL, &filename))) {
 		return ENOMEM;
 	}
 
@@ -836,7 +1047,7 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 		return err;
 	}
 
-	if (err = fseek(fp, 0, SEEK_END)) {
+	if ((err = fseek(fp, 0, SEEK_END))) {
 		err = errno;
 		FREE_THINGS_SD();
 		return err;
@@ -852,14 +1063,14 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 
 	logweb("serving document %s", filename);
 	sprintf_s(full_response, _countof(full_response), "HTTP/1.0 200 \r\n");
-	if (err = sendall(ctxt->client, full_response, strlen(full_response))) {
+	if ((err = sendall(ctxt->client, full_response, strlen(full_response)))) {
 		FREE_THINGS_SD();
 		*attempt_to_serve_error = 0;
 		return err;
 	}
 
-	sprintf_s(full_response, _countof(full_response), "Content-Length : %d \r\n\r\n", file_size);
-	if (err = sendall(ctxt->client, full_response, strlen(full_response))) {
+	sprintf_s(full_response, _countof(full_response), "Content-Length : %ld \r\n\r\n", file_size);
+	if ((err = sendall(ctxt->client, full_response, strlen(full_response)))) {
 		FREE_THINGS_SD();
 		*attempt_to_serve_error = 0;
 		return err;
@@ -867,8 +1078,7 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 
 	do {
 		amt_read = fread(data, 1, READ_CHUNK_SIZE, fp);
-		ptr_send = data;
-		if (err = ferror(fp)) {
+		if ((err = ferror(fp))) {
 			FREE_THINGS_SD();
 			*attempt_to_serve_error = 1;
 			return err;
@@ -888,6 +1098,64 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 }
 
 //
+// This routine runs from the thread spawned by simple_server in response to an
+// incoming TCP connection.
+//
+// It attemps to parse an HTTP request from a client and, if successful, return
+// a single static website.
+//
+// After doing so (successful or not), it exits and the thread terminates.
+//
+// It does not return a value.
+//
+#ifdef _WIN32
+void client_thread(void* thread_argument) {
+#else
+void* client_thread(void* thread_argument) {
+#endif
+	logweb("New request");
+	SOCKET client = (SOCKET)(intptr_t)thread_argument;
+
+	int err, attempt_to_serve_error = 1;
+	struct context* ctxt;
+	err = init_lineparser(&ctxt);
+
+	if (!err) {
+		ctxt->client = client;
+		err = parseheaders(ctxt);
+		if (!err) {
+			err = serve_document(ctxt, &attempt_to_serve_error);
+			free(ctxt->request_uri);
+		}
+
+		if (err && attempt_to_serve_error) {
+			serveerr(ctxt, err);
+		}
+
+		free(ctxt->line_buffer);
+	}
+
+#ifdef _WIN32
+	closesocket(client);
+#else
+	close(client);
+#endif
+
+	free(ctxt);
+
+#ifndef _WIN32
+	return 0;
+#endif
+}
+
+#ifndef _WIN32
+volatile sig_atomic_t flag_exit = 0;
+void handle_ctrlc(int sig) {
+	flag_exit = 1;
+}
+#endif
+
+//
 // This routine runs a simple webserver on localhost port 8080.
 //
 // For each connection received, it spawns a thread which runs the
@@ -897,12 +1165,15 @@ int serve_document(struct context* ctxt, int* attempt_to_serve_error) {
 //
 void simple_server() {
 	// Open logfile
-	int err = fopen_s(&logfile, "c:\\webserverdata\\log.txt", "a");
+	int err = fopen_s(&logfile, "log.txt", "a");
 	if (err) ERROR_EXIT("fopen log.txt");
 
+#ifdef _WIN32
 	// Initialize Winsock.
 	WSADATA d = { 0 };
 	if (WSAStartup(MAKEWORD(2, 2), &d)) ERROR_EXIT("WSAStartup");
+#endif
+
 	SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
 	if (s == -1) ERROR_EXIT("socket");
 
@@ -915,34 +1186,63 @@ void simple_server() {
 	if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) == -1) ERROR_EXIT("bind");
 
 	struct sockaddr_storage ta;
+#ifdef _WIN32
 	int tas = sizeof(ta);
+#else
+	socklen_t tas = sizeof(ta);
+#endif
+
 	if (listen(s, 10) == -1) ERROR_EXIT("listen");
 
 	// Accept connections, creating a new thread for each.
 	SOCKET client;
 	while (1) {
 		client = accept(s, (struct sockaddr*)&ta, &tas);
+#ifndef _WIN32
+		if (flag_exit) {
+			printf("Caught CTRL-C. Exiting.\n");
+			fclose(logfile);
+			return;
+		}
+#endif
+
 		if (client == -1) ERROR_EXIT("accept");
 		log_clientconnection(client);
+#ifdef _WIN32
 		_beginthread(client_thread, 0, (void*)client);
+#else
+		pthread_t thread;
+		pthread_create(&thread, NULL, client_thread, (void*)(intptr_t)client);
+#endif
 	}
 }
 
 int main(int argc, char *argv[]) {
-	int err = 0;
 
 #ifndef TESTING
 
+#ifndef _WIN32
+	struct sigaction a;
+	a.sa_handler = handle_ctrlc;
+	a.sa_flags = 0;
+	sigemptyset( &a.sa_mask );
+	sigaction( SIGINT, &a, NULL );
+#endif
 	printf("Starting server in normal (non-test) mode.\n");
 	simple_server();
 	return 0;
 
 #else 
+	int err = 0;
 
 	printf("Testing the server.\n");
 
 	printf("Testing readline() function.\n");
 	err = test_readline();
+	printf("done err: %d.\n", err);
+
+	printf("Testing format_uri() function.\n");
+	test_format_uri();
 	printf("done\n");
 
     return err;
@@ -951,6 +1251,7 @@ int main(int argc, char *argv[]) {
 
 }
 
+<<<<<<< HEAD
 int get_client_name(struct context* ctxt) {
 	struct sockaddr addr;
 	socklen_t addrlen = sizeof(addr);
@@ -1010,51 +1311,51 @@ void client_thread(void* thread_argument) {
 }
 
 void logweb(char* format, ...) {
-	char* time = iso8601time();
 	size_t fileline_len;
 	char* fileline = NULL;
+	int len;
+	char * buffer = NULL;
 
+	char* time = iso8601time();
 	if (time == NULL) {
-		time = "Not enough memory to format timestamp";
+		perror("logweb: iso8601time: NULL");
+		goto End;
 	}
 
 	va_list args;
-	int len;
-	char * buffer;
-
 	va_start(args, format);
 	if ((len = _vscprintf(format, args)) == -1) {
-		perror("logweb _vscprintf: invalid format string");
+		perror("logweb: _vscprintf: invalid format string");
 		goto End;
 	}
 	
 	len += 1; // _vscprintf doesn't count terminating '\0'
 	if ((buffer = malloc(len * sizeof(char))) == NULL) {
-		printf("Error: Unable to allocate memory for log message. Skipping.\n");
+		printf("logweb: malloc(log message): NULL");
 		goto End;
 	}
 
 	if (vsprintf_s(buffer, len, format, args) == -1) {
-		perror("logweb vsprintf_s invalid format string");
+		perror("logweb: vsprintf_s: invalid format string");
 		goto End;
 	}
 
 	if (SIZE_MAX - strlen(time) < 5 || SIZE_MAX - strlen(buffer) < strlen(time) + 5) { // Integer overflow
-		printf("Error: Log message too large to log. Skipping\n");
+		printf("logweb: log message too large (integer overflow)");
 		goto End;
 	}
 	
 	fileline_len = strlen(time) + 5 + strlen(buffer);
 	fileline = malloc(fileline_len);
 	if (fileline == NULL) {
-		printf("Error: Not enough memory to format log message. Skipping.\n");
+		printf("logweb: malloc(fileline): NULL");
 		goto End;
 	}
 
 	sprintf_s(fileline, fileline_len, "%s : %s\n", time, buffer);
 
 	fwrite(fileline, 1, fileline_len, logfile);
-	printf(fileline);
+	printf("%s", fileline);
 
 End:
 	if (time) free(time);
@@ -1066,53 +1367,88 @@ void log_clientconnection(SOCKET client) {
 	struct sockaddr addr;
 	socklen_t addrlen = sizeof(addr);
 	if (getpeername(client, &addr, &addrlen) == -1) {
-		perror("getpeername(client)");
+		perror("log_clientconnection: getpeername(client)");
 		return;
 	}
 
 	char hbuf[NI_MAXHOST], sbuf[NI_MAXSERV];
 	if (getnameinfo(&addr, addrlen, hbuf, sizeof(hbuf), sbuf, sizeof(sbuf), NI_NUMERICHOST | NI_NUMERICSERV)) {
-		perror("getnameinfo(client)");
+		perror("log_clientconnection: getnameinfo(client)");
 		return;
 	}
 
 	logweb("New connection from %s:%s", hbuf, sbuf);
 }
 
+// Returns the current time formatted according to ISO8601 as a string, or NULL upon failure.
+// If a non-NULL value is returned, the caller is responsible for freeing that memory.
 char* iso8601time() {
-	struct tm tmNow;
+	char* return_string = NULL;
 
-	// Get the current time
+	// Get the current time in milliseconds.
 	time_t now = time(NULL);
-	_localtime64_s(&tmNow, &now);
 
-	char* bufferTime = malloc(26);
-	if (bufferTime == NULL) {
-		perror("iso8601time: unable to allocate memory for bufferTime");
-		return NULL;
+	// Break it out into years, ... minutes, seconds.
+	struct tm now_parts;
+#ifdef _WIN32
+	_localtime64_s(&now_parts, &now);
+#else
+	localtime_r(&now, &now_parts);
+#endif
+
+	// Allocate buf for ISO 8601 string representation.
+#define TIME_BUF_LEN 26
+	char* time_str = malloc(TIME_BUF_LEN);
+	if (time_str == NULL) {
+		perror("iso8601time: unable to allocate memory for time_str");
+		goto End;
 	}
 
-	char* bufferTimezoneOffset = malloc(6);
-	if (!bufferTimezoneOffset) {
+	time_str[0] = '\0';
+
+	char* timezone_off_str = malloc(6);
+	if (!timezone_off_str) {
 		free(bufferTime);
-		perror("iso8601time: unable to allocate memory for bufferTimezoneOffset");
+		perror("iso8601time: unable to allocate memory for timezone_off_str");
 		return NULL;
 	}
+
+	timezone_off_str[0] = '\0';
 
 	// The current time formatted "2017-02-22T10:00:00"
-	size_t tsizTime = strftime(bufferTime, 26, "%Y-%m-%dT%H:%M:%S", &tmNow);
+	size_t time_len = strftime(time_str, TIME_BUF_LEN, "%Y-%m-%dT%H:%M:%S", &now_parts);
+	if (!time_len) {
+		perror("iso8601time: strftime returned 0 for ISO8601 time format");
+		goto End;
+	}
 
-	// The timezone offset -0500
-	size_t tsizOffset = strftime(bufferTimezoneOffset, 6, "%z", &tmNow);
-	
+	// The timezone offset eg: "-0500"
+	size_t timezone_off_len = strftime(timezone_off_str, 6, "%z", &now_parts);
+	if (!timezone_off_len) {
+		perror("iso8601time: strftime returned 0 for ISO8601 time format");
+		goto End;
+	}
+
 	// Adds the hour part of the timezone offset
-	strncpy_s(&bufferTime[tsizTime], 26 - tsizTime, bufferTimezoneOffset, 3);
+	strncpy_s(&time_str[time_len], TIME_BUF_LEN - time_len, timezone_off_str, 3);
 	
 	// insert ':'
-	bufferTime[tsizTime + 3] = ':';
+	time_str[time_len + 3] = ':';
 	
 	// Adds the minutes part of the timezone offset
-	strncpy_s(&bufferTime[tsizTime + 4], 26 - tsizTime - 4, &bufferTimezoneOffset[3], 3);
+	strncpy_s(&time_str[time_len + 4], 26 - time_len - 4, &timezone_off_str[3], 3);
+
+	return_string = time_str;
+End:
+	if (!return_string) {
+		// Some error; clean up allocated memory.
+		if (time_str) {
+			free(time_str);
+		}
+
+		if (timezone_off_len) {
+			free(timezone_off_len);
+	}
 
 	// Output: "2017-02-22T10:00:00-05:00"
 	return bufferTime;
