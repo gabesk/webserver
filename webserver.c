@@ -80,6 +80,8 @@ FILE* logfile;
 char* iso8601time();
 void logweb(char* message, ...);
 void log_clientconnection(SOCKET client);
+void log_request(char* client_hostname, char* request_string, int status_code);
+int get_client_name(struct context* ctxt);
 
 //
 // Parameters for tuning webserver performance.
@@ -1137,6 +1139,14 @@ void* client_thread(void* thread_argument) {
 		err = parseheaders(ctxt, &request_line, &request_uri);
 		if (!err) {
 			err = serve_document(ctxt, request_uri, &attempt_to_serve_error);
+			int name_err = get_client_name(ctxt);
+			if (!name_err) {
+				log_request(ctxt->client_hostname, request_line, errno_to_http_status(err));
+			}
+			else {
+				log_request("Error retrieving client hostname", request_line, errno_to_http_status(err));
+			}
+
 			free(request_line);
 			free(request_uri);
 		}
@@ -1439,6 +1449,7 @@ void log_request(char* client_hostname, char* request_string, int status_code) {
 	}
 
 	fprintf(logfile, "%s - - [%s] \"%s\" %d\n", client_hostname, time, request_string, status_code);
+	printf("%s - - [%s] \"%s\" %d\n", client_hostname, time, request_string, status_code);
 
 	//fprintf()
 	//fwrite(fileline, 1, fileline_len, logfile);
