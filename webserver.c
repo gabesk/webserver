@@ -649,34 +649,64 @@ int init_lineparser(struct context** outctxt) {
 // ctxt->request_uri
 //
 #define VERB_GET "GET "
-int parse_get(char* header, char** request_uri) {
+int parse_get(char* header, char** request_line, char** request_uri) {
 #ifdef _WIN32
 	char* next_token = NULL;
 #endif
+	int err = 0;
+
+	char* maybe_request_line = _strdup(header);
+	if (!maybe_request_line) {
+		err = ENOMEM;
+		goto End;
+	}
+
 	char* tok = strtok_s(header, " ", &next_token);
 	int i = 0;
 
 	while (tok) {
 		switch (i) {
 		case 0:
-			if (strcmp("GET", tok)) return ENOSYS; // Only GET implemented
+			if (strcmp("GET", tok)) {
+				err = ENOSYS; // Only GET implemented
+				goto End;
+			}
 			break;
 		case 1:
-			*request_uri = _strdup(tok); if (!*request_uri) return ENOMEM;
+			*request_uri = _strdup(tok); 
+			if (!*request_uri) {
+				err = ENOMEM;
+				goto End;
+			}
 			break;
 		case 2:
-			if (strstr(tok, "HTTP/") != tok) return EINVAL; // Should start with HTTP/ and the rest should parse as a float
+			if (strstr(tok, "HTTP/") != tok) {
+				err = EINVAL; // Should start with HTTP/ and the rest should parse as a float
+				goto End;
+			}
 			// Don't actually care about the version.
 			break;
 		default:
-			return EINVAL; // Request method can only contain 3 parts
+			err = EINVAL; // Request method can only contain 3 parts
+			goto End;
 		}
 		tok = strtok_s(NULL, " ", &next_token);
 		i++;
 	}
 
-	if (!*request_uri) return EINVAL; // Must supply a URI
-	return 0;
+	if (!*request_uri) {
+		err = EINVAL; // Must supply a URI
+		goto End;
+	}
+
+End:
+	if (!err) {
+		*request_line = maybe_request_line;
+	} else {
+		if (maybe_request_line) free(maybe_request_line);
+	}
+
+	return err;
 }
 
 void parseheader(char* header) {
@@ -708,7 +738,7 @@ int parseheaders(struct context* ctxt, char** request_line, char** request_uri) 
 	while (*curheader) {
 		if (strlen(*curheader)) {
 			if (!parsed_first_line) {
-				err = parse_get(*curheader, request_uri);
+				err = parse_get(*curheader, request_line, request_uri);
 				if (err) {
 					if (*request_uri) free(*request_uri);
 					freeheaders(headers);
